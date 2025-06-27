@@ -134,34 +134,76 @@ def checkService(cluster_name, service_name):
     return True
 
   service_list = []
-  for serviceArn in ecs.list_services(
-    cluster = cluster_name,
-    maxResults = 100,
-    launchType = 'FARGATE'
-  )['serviceArns']:
-    service = serviceArn.split('/')[len(serviceArn.split('/')) - 1]
-    service_list.append(service)
-
-  if service_name in service_list:
-    return True
-  else :
-    return False
+  next_token = None
+  while True:
+    if next_token:
+      response = ecs.list_services(
+        cluster=cluster_name,
+        maxResults=100,
+        nextToken=next_token
+      )
+    else:
+      response = ecs.list_services(
+        cluster=cluster_name,
+        maxResults=100
+      )
+    service_arns = response['serviceArns']
+    if not service_arns:
+      break
+    # 10件ずつ describe_services に渡す
+    for i in range(0, len(service_arns), 10):
+      batch_arns = service_arns[i:i + 10]
+      describe_response = ecs.describe_services(
+        cluster=cluster_name,
+        services=batch_arns
+      )
+      for service in describe_response['services']:
+        launch_type = service.get('launchType')
+        if launch_type not in ['EC2', 'EXTERNAL']:
+          service_list.append(service['serviceName'])
+    next_token = response.get('nextToken')
+    if not next_token:
+      break
+  return service_name in service_list
 
 # サービス名の設定
 def setService(logger, cluster_name):
   session = boto3.session.Session(profile_name = os.environ['AWS_PROFILE'])
   ecs = session.client('ecs')
-
   service_list = []
-  for serviceArn in ecs.list_services(
-    cluster = cluster_name,
-    maxResults = 100,
-    launchType = 'FARGATE'
-  )['serviceArns']:
-    service = serviceArn.split('/')[len(serviceArn.split('/')) - 1]
-    service_list.append(service)
+  next_token = None
+  while True:
+    if next_token:
+      response = ecs.list_services(
+        cluster=cluster_name,
+        maxResults=100,
+        nextToken=next_token
+      )
+    else:
+      response = ecs.list_services(
+        cluster=cluster_name,
+        maxResults=100
+      )
+    service_arns = response['serviceArns']
+    if not service_arns:
+      break
+    # 10 個ずつ分割して describe_services を呼び出し
+    for i in range(0, len(service_arns), 10):
+      batch_arns = service_arns[i:i + 10]
+      describe_response = ecs.describe_services(
+        cluster=cluster_name,
+        services=batch_arns
+      )
+      for service in describe_response['services']:
+        launch_type = service.get('launchType')
+        if launch_type not in ['EC2', 'EXTERNAL']:
+          service_list.append(service['serviceName'])
+    next_token = response.get('nextToken')
+    if not next_token:
+      break
+  # スタンドアロンタスク用の選択肢を追加
   service_list.append('[standalone-tasks]')
-
+  # サービス選択
   service_name = selected_answer(service_list, "接続先が存在するサービス名を選択してください")
   if service_name == '[standalone-tasks]':
     logger.info('サービス名: {}\n'.format(service_name))
@@ -169,7 +211,7 @@ def setService(logger, cluster_name):
   elif checkService(cluster_name, service_name):
     logger.info('サービス名: {}\n'.format(service_name))
     return service_name
-  else :
+  else:
     raise Exception('正しいサービス名を選択してください。')
 
 # タスク名のチェック
@@ -182,8 +224,7 @@ def checkTask(cluster_name, service_name, task_name):
     for task_arn in ecs.list_tasks(
       cluster = cluster_name,
       desiredStatus = 'RUNNING',
-      maxResults = 100,
-      launchType = 'FARGATE'
+      maxResults = 100
     )['taskArns']:
       task = task_arn.split('/')[len(task_arn.split('/')) - 1]
       task_list.append(task)
@@ -192,8 +233,7 @@ def checkTask(cluster_name, service_name, task_name):
       cluster = cluster_name,
       serviceName = service_name,
       desiredStatus = 'RUNNING',
-      maxResults = 100,
-      launchType = 'FARGATE'
+      maxResults = 100
     )['taskArns']:
       task = task_arn.split('/')[len(task_arn.split('/')) - 1]
       task_list.append(task)
@@ -213,8 +253,7 @@ def setTask(logger, cluster_name, service_name):
     task_arn = ecs.list_tasks(
       cluster = cluster_name,
       desiredStatus = 'RUNNING',
-      maxResults = 100,
-      launchType = 'FARGATE'
+      maxResults = 100
     )['taskArns']
     task_details = ecs.describe_tasks(cluster=cluster_name, tasks=task_arn)
     # スタンドアロンタスクをフィルタリング
@@ -227,8 +266,7 @@ def setTask(logger, cluster_name, service_name):
       cluster = cluster_name,
       serviceName = service_name,
       desiredStatus = 'RUNNING',
-      maxResults = 100,
-      launchType = 'FARGATE'
+      maxResults = 100
     )['taskArns']:
       task_name = task_arn.split('/')[len(task_arn.split('/')) - 1]
       task_list.append(task_name)
@@ -242,7 +280,7 @@ def setTask(logger, cluster_name, service_name):
     logger.info('タスク名: {}\n'.format(task_name))
     return task_name
   else :
-    raise Exceptiont('正しいタスク名を選択してください。')
+    raise Exception('正しいタスク名を選択してください。')
 
 # コンテナ名のチェック
 def checkContainer(cluster_name, task_name, container_name):
