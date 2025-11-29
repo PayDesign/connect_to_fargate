@@ -41,7 +41,7 @@ if [ -z "${OPT_PROFILE}" ]; then
   exit
 fi
 
-aws s3 ls --profile=$OPT_PROFILE > /dev/null 2>&1
+aws sts get-caller-identity --profile $OPT_PROFILE > /dev/null 2>&1
 
 if [ "${?}" != "0" ]; then
   aws sso login --profile=$OPT_PROFILE
