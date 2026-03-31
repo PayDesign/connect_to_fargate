@@ -134,11 +134,27 @@ $ mkdir -p ~/.connect_to_fargate/log
 $ connect_to_fargate.py
 ```
 
-このコマンドを実行する前にAWSからアクセス資格を取得する必要があります。`aws sso login`の説明をご参考ください。
+`-p/--profile` を指定した場合、スクリプト内部で前回 `aws sso login` を実行した日時を参照し、設定されたセッション維持時間を超えていれば `aws sso logout` -> `aws sso login --profile <profile>` を実行します。
+
+`-p/--profile` を省略する場合は、従来通り `AWS_PROFILE` を設定してください。
+
+セッション維持時間は `~/.connect_to_fargate/config.json` の `sso_session_duration_hours` で時間単位に指定できます。設定ファイルが存在しない場合、デフォルトは `12` 時間です。
+
+例:
+
+```json
+{
+  "sso_session_duration_hours": 12
+}
+```
+
+前回ログイン日時は `~/.connect_to_fargate/state.json` にプロファイルごとに保存されます。
 
 ※connect_to_fargate.py_(日時).logにログが出力されます。
 
 ※引数に以下を利用できるように追加しました。
+
+`-p, --profile=profile_name` AWS プロファイル名（未指定時は `AWS_PROFILE` を利用）
 
 --cluster=クラスター名（指定ない場合は、対話型の選択画面に遷移）
 
@@ -146,11 +162,27 @@ $ connect_to_fargate.py
 
 --task=タスク名（指定ない場合は、対話型の選択画面に遷移）
 
---container=コンテナ名（指定ない場合は、対話型の選択画面に遷移）
+`-t, --container=コンテナ名`（指定ない場合は、対話型の選択画面に遷移）
 
 --cmd=コンテナで実行するコマンド（指定ない場合は、/bin/bash）
 
+`-f, --force` 接続確認なしでログインを行う
+
+`--force-login` SSO セッションを強制的に再ログインする（`aws sso logout` -> `aws sso login`）
+
 ※Ctrl + Cの挙動は変更しました（接続処理直前にSIGINTをSIG_IGNに変換する処理を追加）
+
+### 実行結果（help）
+
+```
+$ connect_to_fargate.py --help
+```
+
+```
+usage: connect_to_fargate.py [-h] [-p PROFILE] [-c CLUSTER] [-s SERVICE]
+                             [--task TASK] [-t CONTAINER] [--cmd CMD] [-f]
+                             [--force-login]
+```
 
 
 ### 実行結果（例１ 引数なし）

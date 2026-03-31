@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import boto3
+import argparse
 import sys
 import subprocess
 import os
@@ -7,56 +7,18 @@ import traceback
 import logging
 import datetime
 import signal
-import inquirer
+import shlex
+import shutil
 import json
-import string
-from inquirer import themes
-from inquirer.render.console import ConsoleRender, List
-from readchar import key
 
-# emacs風のキーバインド
-class ExtendedConsoleRender(ConsoleRender):
-    def render_factory(self, question_type):
-        if question_type == "list":
-            return ExtendedList
-        return super().render_factory(question_type)
-
-# CTRL_MAP["B"]はkey.CTRL_Bでも良いのだけれどAからZまで全部は定義されていなかったので
-CTRL_MAP = {c: chr(i) for i, c in enumerate(string.ascii_uppercase, 1)}
-
-
-class ExtendedList(List):
-    def process_input(self, pressed):
-        # emacs style
-        if pressed in (CTRL_MAP["B"], CTRL_MAP["P"]):
-            pressed = key.UP
-        elif pressed in (CTRL_MAP["F"], CTRL_MAP["N"]):
-            pressed = key.DOWN
-        elif pressed == CTRL_MAP["G"]:
-            pressed = CTRL_MAP["C"]
-        elif pressed == CTRL_MAP["A"]:
-            self.current = 0
-            return
-        elif pressed == CTRL_MAP["G"]:
-            self.current = len(self.question.choices) - 1
-            return
-
-        # vi style
-        if pressed in ("k", "h"):
-            pressed = key.UP
-        elif pressed in ("j", "l"):
-            pressed = key.DOWN
-        elif pressed == "q":
-            pressed = key.CTRL_C
-
-        # effect (rendering)
-        super().process_input(pressed)
+DEFAULT_SSO_SESSION_DURATION_HOURS = 12
 
 # ログ出力設定関数
 def setLogger():
   script_name = __file__.split('/')[-1]
-  log_dir_name = os.environ['HOME'] + '/.' + script_name.split('.')[0] + '/log'
-  log_dir_base = log_dir_name + '/' if (os.path.exists(log_dir_name)) else './'
+  log_dir_name = os.path.join(get_app_dir(), 'log')
+  os.makedirs(log_dir_name, exist_ok=True)
+  log_dir_base = log_dir_name + '/'
 
   dt = datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')
   logfile_name = log_dir_base + '{}_{}.log'.format(script_name, dt)
@@ -78,7 +40,127 @@ def setLogger():
 
   return logger, logfile_name
 
+
+def get_app_name():
+  return os.path.splitext(os.path.basename(__file__))[0]
+
+
+def get_app_dir():
+  return os.path.join(os.path.expanduser('~'), '.{}'.format(get_app_name()))
+
+
+def get_config_path():
+  return os.path.join(get_app_dir(), 'config.json')
+
+
+def get_state_path():
+  return os.path.join(get_app_dir(), 'state.json')
+
+
+def load_json_file(path, default):
+  if not os.path.exists(path):
+    return default
+  with open(path, 'r', encoding='utf-8') as f:
+    return json.load(f)
+
+
+def save_json_file(path, data):
+  os.makedirs(os.path.dirname(path), exist_ok=True)
+  with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_sso_session_duration_hours():
+  config = load_json_file(get_config_path(), {})
+  duration_hours = config.get('sso_session_duration_hours', DEFAULT_SSO_SESSION_DURATION_HOURS)
+  try:
+    duration_hours = float(duration_hours)
+  except (TypeError, ValueError):
+    raise Exception(
+      '設定ファイル `{}` の `sso_session_duration_hours` は時間単位の数値で指定してください。'.format(
+        get_config_path()
+      )
+    )
+  if duration_hours <= 0:
+    raise Exception(
+      '設定ファイル `{}` の `sso_session_duration_hours` は 0 より大きい値を指定してください。'.format(
+        get_config_path()
+      )
+    )
+  return duration_hours
+
+
+def load_sso_state():
+  return load_json_file(get_state_path(), {'profiles': {}})
+
+
+def get_last_sso_login_at(profile_name):
+  state = load_sso_state()
+  profile_state = state.get('profiles', {}).get(profile_name, {})
+  last_login_at = profile_state.get('last_sso_login_at')
+  if not last_login_at:
+    return None
+  try:
+    return datetime.datetime.fromisoformat(last_login_at)
+  except ValueError:
+    raise Exception(
+      '状態ファイル `{}` の `last_sso_login_at` が不正です。'.format(get_state_path())
+    )
+
+
+def record_sso_login(profile_name, logged_in_at=None):
+  state = load_sso_state()
+  profiles = state.setdefault('profiles', {})
+  profiles[profile_name] = {
+    'last_sso_login_at': (logged_in_at or datetime.datetime.now(datetime.timezone.utc)).isoformat()
+  }
+  save_json_file(get_state_path(), state)
+
 def selected_answer(choices, message):
+  import json
+  import string
+  import inquirer
+  from inquirer import themes
+  from inquirer.render.console import ConsoleRender, List
+  from readchar import key
+
+  # CTRL_MAP["B"]はkey.CTRL_Bでも良いのだけれどAからZまで全部は定義されていなかったので
+  CTRL_MAP = {c: chr(i) for i, c in enumerate(string.ascii_uppercase, 1)}
+
+  # emacs風のキーバインド
+  class ExtendedConsoleRender(ConsoleRender):
+      def render_factory(self, question_type):
+          if question_type == "list":
+              return ExtendedList
+          return super().render_factory(question_type)
+
+  class ExtendedList(List):
+      def process_input(self, pressed):
+          # emacs style
+          if pressed in (CTRL_MAP["B"], CTRL_MAP["P"]):
+              pressed = key.UP
+          elif pressed in (CTRL_MAP["F"], CTRL_MAP["N"]):
+              pressed = key.DOWN
+          elif pressed == CTRL_MAP["G"]:
+              pressed = CTRL_MAP["C"]
+          elif pressed == CTRL_MAP["A"]:
+              self.current = 0
+              return
+          elif pressed == CTRL_MAP["G"]:
+              self.current = len(self.question.choices) - 1
+              return
+
+          # vi style
+          if pressed in ("k", "h"):
+              pressed = key.UP
+          elif pressed in ("j", "l"):
+              pressed = key.DOWN
+          elif pressed == "q":
+              pressed = key.CTRL_C
+
+          # effect (rendering)
+          super().process_input(pressed)
+
   questions = [
       inquirer.List(
           "answer",
@@ -91,10 +173,126 @@ def selected_answer(choices, message):
   return json.loads(json.dumps(answer))['answer']
 
 
+def get_ecs_client():
+  import boto3
+
+  session = boto3.session.Session(profile_name = os.environ['AWS_PROFILE'])
+  return session.client('ecs')
+
+
+def build_parser():
+  parser = argparse.ArgumentParser(
+    prog='connect_to_fargate.py',
+    description='AWS SSO の状態を確認し、必要に応じてログインしてから Fargate に接続します。',
+    epilog=(
+      'Examples:\n'
+      '  connect_to_fargate.py -p profile\n'
+      '  connect_to_fargate.py -p profile -c cluster -s service -t app -f\n'
+      '  connect_to_fargate.py --profile profile --cluster cluster --task task-id --container app'
+    ),
+    formatter_class=argparse.RawTextHelpFormatter,
+  )
+  parser.add_argument('-p', '--profile', help='AWS プロファイル名。未指定時は AWS_PROFILE を利用')
+  parser.add_argument('-c', '--cluster', help='クラスター名')
+  parser.add_argument('-s', '--service', help='サービス名')
+  parser.add_argument('--task', help='タスク名')
+  parser.add_argument('-t', '--container', help='コンテナ名')
+  parser.add_argument('--cmd', default='/bin/bash', help='コンテナで実行するコマンド')
+  parser.add_argument('-f', '--force', action='store_true', help='接続確認なしでログインを行う')
+  parser.add_argument(
+    '--force-login',
+    action='store_true',
+    help='SSO セッションを強制的に再ログインする（aws sso logout -> aws sso login）',
+  )
+  return parser
+
+
+def get_aws_cli_path():
+  aws_cli = shutil.which('aws')
+  if aws_cli:
+    return aws_cli
+  fallback = '/usr/local/bin/aws'
+  if os.path.exists(fallback):
+    return fallback
+  raise Exception('aws cli が見つかりません。PATH または /usr/local/bin/aws を確認してください。')
+
+
+def resolve_aws_profile(profile_name):
+  resolved_profile = profile_name or os.environ.get('AWS_PROFILE')
+  if not resolved_profile:
+    raise Exception('AWS プロファイルが未指定です。`-p/--profile` または `AWS_PROFILE` を指定してください。')
+  os.environ['AWS_PROFILE'] = resolved_profile
+  return resolved_profile
+
+
+def run_aws_sso_login(logger, profile_name):
+  aws_cli = get_aws_cli_path()
+  login_cmd = [aws_cli, 'sso', 'login', '--profile', profile_name]
+  logger.info('`aws sso login --profile {}` を実行します'.format(profile_name))
+  login_result = subprocess.run(login_cmd)
+  if login_result.returncode != 0:
+    raise Exception('aws sso login に失敗しました。profile={}'.format(profile_name))
+  record_sso_login(profile_name)
+  logger.info('AWS SSO ログインが完了しました: profile={}'.format(profile_name))
+
+
+def run_aws_sso_logout(logger):
+  aws_cli = get_aws_cli_path()
+  logout_cmd = [aws_cli, 'sso', 'logout']
+  logger.info('`aws sso logout` を実行します')
+  logout_result = subprocess.run(logout_cmd)
+  if logout_result.returncode != 0:
+    logger.warning('aws sso logout は失敗しましたが、続けて aws sso login を実行します。')
+    return
+  logger.info('AWS SSO ログアウトが完了しました')
+
+
+def ensure_aws_sso_login(logger, profile_name, session_duration_hours, force_login):
+  last_login_at = get_last_sso_login_at(profile_name)
+  logger.info(
+    'SSO セッション維持時間: {}時間 (config: {})'.format(
+      session_duration_hours,
+      get_config_path(),
+    )
+  )
+
+  if force_login:
+    logger.info('`--force-login` が指定されたため、SSO セッションを再作成します')
+    run_aws_sso_logout(logger)
+    run_aws_sso_login(logger, profile_name)
+    return
+
+  if last_login_at is None:
+    logger.info('前回の AWS SSO ログイン記録がないため、ログインを実行します')
+    run_aws_sso_login(logger, profile_name)
+    return
+
+  if last_login_at.tzinfo is None:
+    last_login_at = last_login_at.replace(tzinfo=datetime.timezone.utc)
+
+  elapsed = datetime.datetime.now(datetime.timezone.utc) - last_login_at.astimezone(datetime.timezone.utc)
+  session_limit = datetime.timedelta(hours=session_duration_hours)
+  if elapsed >= session_limit:
+    logger.info(
+      '前回の AWS SSO ログインから {} を超過したため、再ログインします'.format(
+        session_limit
+      )
+    )
+    run_aws_sso_logout(logger)
+    run_aws_sso_login(logger, profile_name)
+    return
+
+  logger.info(
+    'AWS SSO ログイン記録は有効期間内です: profile={}, last_login_at={}'.format(
+      profile_name,
+      last_login_at.isoformat(),
+    )
+  )
+
+
 # クラスター名のチェック
 def checkCluster(cluster_name):
-  session = boto3.session.Session(profile_name = os.environ['AWS_PROFILE'])
-  ecs = session.client('ecs')
+  ecs = get_ecs_client()
 
   cluster_list = []
   for clusterArn in ecs.list_clusters()['clusterArns']:
@@ -108,8 +306,7 @@ def checkCluster(cluster_name):
 
 # クラスター名の設定
 def setCluster(logger):
-  session = boto3.session.Session(profile_name = os.environ['AWS_PROFILE'])
-  ecs = session.client('ecs')
+  ecs = get_ecs_client()
 
   cluster_list = []
   for clusterArn in ecs.list_clusters()['clusterArns']:
@@ -126,8 +323,7 @@ def setCluster(logger):
 
 # サービス名のチェック
 def checkService(cluster_name, service_name):
-  session = boto3.session.Session(profile_name = os.environ['AWS_PROFILE'])
-  ecs = session.client('ecs')
+  ecs = get_ecs_client()
 
   ## スタンドアロンタスクを指定したい場合はチェックを行わない
   if service_name is None:
@@ -168,8 +364,7 @@ def checkService(cluster_name, service_name):
 
 # サービス名の設定
 def setService(logger, cluster_name):
-  session = boto3.session.Session(profile_name = os.environ['AWS_PROFILE'])
-  ecs = session.client('ecs')
+  ecs = get_ecs_client()
   service_list = []
   next_token = None
   while True:
@@ -216,8 +411,7 @@ def setService(logger, cluster_name):
 
 # タスク名のチェック
 def checkTask(cluster_name, service_name, task_name):
-  session = boto3.session.Session(profile_name = os.environ['AWS_PROFILE'])
-  ecs = session.client('ecs')
+  ecs = get_ecs_client()
 
   task_list = []
   if service_name is None:
@@ -245,8 +439,7 @@ def checkTask(cluster_name, service_name, task_name):
 
 # タスク名の設定
 def setTask(logger, cluster_name, service_name):
-  session = boto3.session.Session(profile_name = os.environ['AWS_PROFILE'])
-  ecs = session.client('ecs')
+  ecs = get_ecs_client()
 
   task_list = []
   if service_name is None:
@@ -284,8 +477,7 @@ def setTask(logger, cluster_name, service_name):
 
 # コンテナ名のチェック
 def checkContainer(cluster_name, task_name, container_name):
-  session = boto3.session.Session(profile_name = os.environ['AWS_PROFILE'])
-  ecs = session.client('ecs')
+  ecs = get_ecs_client()
 
   task_detail_list = ecs.describe_tasks(
     cluster = cluster_name,
@@ -305,8 +497,7 @@ def checkContainer(cluster_name, task_name, container_name):
 
 # コンテナ名の設定
 def setContainer(logger, cluster_name, task_name):
-  session = boto3.session.Session(profile_name = os.environ['AWS_PROFILE'])
-  ecs = session.client('ecs')
+  ecs = get_ecs_client()
 
   container_list = []
   task_detail_list = ecs.describe_tasks(
@@ -353,11 +544,15 @@ def ecsExecute(logger, cluster_name, service_name, task_name, container_name, sh
     #)
     #/bin/bashの場合セッションが切れてしまうためsubprocessを利用する方式に変更
     logger.info('Fargateにログインします')
-    cmd  = '/usr/local/bin/aws ecs execute-command '
-    cmd += '--cluster {} '.format(cluster_name)
-    cmd += '--task {} '.format(task_name)
-    cmd += '--container {} '.format(container_name)
-    cmd += '--interactive --command {} | tee {}'.format(shell_cmd, logfile)
+    aws_cli = get_aws_cli_path()
+    cmd  = '{} ecs execute-command '.format(shlex.quote(aws_cli))
+    cmd += '--cluster {} '.format(shlex.quote(cluster_name))
+    cmd += '--task {} '.format(shlex.quote(task_name))
+    cmd += '--container {} '.format(shlex.quote(container_name))
+    cmd += '--interactive --command {} | tee {}'.format(
+      shlex.quote(shell_cmd),
+      shlex.quote(logfile),
+    )
 
     ## Ctrl+C(SIGINTシグナル)を無視
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -369,57 +564,27 @@ def ecsExecute(logger, cluster_name, service_name, task_name, container_name, sh
   return
 
 def view_help():
-  message = """
-connect_to_fargate.py
-
-Usage:
-1. AWS_PROFILE を設定
-  e.g.) export AWS_PROFILE=mpfront
-2. sso login を行う
-  aws sso login
-3. コマンド実行
-  connect_to_fargate.py [arguments]
-
-Arguments:
-   --help|-h                    help表示
-   --cluster=<cluster_name>     クラスター名指定
-   --service=<service_name>     サービス名指定
-   --task=<task_name>           タスク名指定
-   --container=<container_name> コンテナ名指定
-   --cmd=<command>              コンテナで実行するコマンド（指定ない場合は、/bin/bash）
-   --force                      接続確認なしでログインを行う
-""".strip()
-
-  print(message)
+  print(build_parser().format_help().strip())
 
 # 主処理
-def main():
+def main(argv=None):
   try:
+    parser = build_parser()
+    args = parser.parse_args(argv)
     logger, logfile = setLogger()
+    profile_name = resolve_aws_profile(args.profile)
+    session_duration_hours = load_sso_session_duration_hours()
+    ensure_aws_sso_login(logger, profile_name, session_duration_hours, args.force_login)
 
     ## 初期値の定義
-    cluster_name, service_name, task_name, container_name = '', '', '', ''
-    shell_cmd       = '/bin/bash'
-
-    force_connect = False
-    ## 引数の格納
-    for a in sys.argv:
-      if a.startswith('--cluster='):
-        cluster_name = a.replace('--cluster=', '').strip('\'" []')
-      elif a.startswith('--service='):
-        service_name = a.replace('--service=', '').strip('\'" []')
-      elif a.startswith('--task='):
-        task_name = a.replace('--task=', '').strip('\'" []')
-      elif a.startswith('--container='):
-        container_name = a.replace('--container=', '').strip('\'" []')
-      elif a.startswith('--cmd='):
-        shell_cmd = a.replace('--cmd=', '').strip('\'" []')
-      elif a.startswith('--force'):
-        force_connect = True
-      if a.startswith('--help') or a.startswith('-h'):
-        view_help()
-        return
+    cluster_name = args.cluster or ''
+    service_name = args.service if args.service is not None else ''
+    task_name = args.task or ''
+    container_name = args.container or ''
+    shell_cmd = args.cmd
+    force_connect = args.force
     logger.info('処理を開始します')
+    logger.info('AWS プロファイル: {}\n'.format(profile_name))
 
     ## 引数で指定がない場合に設定する関数を実行する
     if cluster_name == '':
@@ -465,5 +630,4 @@ def main():
 
 # 実行処理
 if __name__ == "__main__":
-  main()
-
+  main(sys.argv[1:])
