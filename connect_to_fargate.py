@@ -41,6 +41,24 @@ def setLogger():
   return logger, logfile_name
 
 
+def read_log_tail(logfile, max_chars=8000):
+  if not os.path.exists(logfile):
+    return ''
+  with open(logfile, 'r', encoding='utf-8', errors='replace') as f:
+    content = f.read()
+  return content[-max_chars:]
+
+
+def build_execute_command_error_message(output):
+  if (
+    'AccessDeniedException' in output and
+    'ecs:ExecuteCommand' in output and
+    'Fargate_Access_SourceIp' in output
+  ):
+    return '許可された Source IP 以外からのアクセスです。AWS VPNに接続しているか確認してください。'
+  return None
+
+
 def get_app_name():
   return os.path.splitext(os.path.basename(__file__))[0]
 
@@ -545,11 +563,11 @@ def ecsExecute(logger, cluster_name, service_name, task_name, container_name, sh
     #/bin/bashの場合セッションが切れてしまうためsubprocessを利用する方式に変更
     logger.info('Fargateにログインします')
     aws_cli = get_aws_cli_path()
-    cmd  = '{} ecs execute-command '.format(shlex.quote(aws_cli))
+    cmd  = 'set -o pipefail; {} ecs execute-command '.format(shlex.quote(aws_cli))
     cmd += '--cluster {} '.format(shlex.quote(cluster_name))
     cmd += '--task {} '.format(shlex.quote(task_name))
     cmd += '--container {} '.format(shlex.quote(container_name))
-    cmd += '--interactive --command {} | tee {}'.format(
+    cmd += '--interactive --command {} 2>&1 | tee {}'.format(
       shlex.quote(shell_cmd),
       shlex.quote(logfile),
     )
@@ -558,7 +576,19 @@ def ecsExecute(logger, cluster_name, service_name, task_name, container_name, sh
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     ## subprocess実行
-    out = subprocess.run(cmd, text=True, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, shell=True)
+    out = subprocess.run(
+      ['/bin/bash', '-lc', cmd],
+      text=True,
+      stdin=sys.stdin,
+      stdout=sys.stdout,
+      stderr=sys.stderr,
+    )
+    if out.returncode != 0:
+      error_output = read_log_tail(logfile)
+      friendly_message = build_execute_command_error_message(error_output)
+      if friendly_message:
+        logger.error(friendly_message)
+      raise Exception('Fargateへの接続に失敗しました。')
     logger.info(out)
     logger.info('Fargateからログアウトしました')
   return
