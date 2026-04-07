@@ -136,7 +136,7 @@ $ connect_to_fargate.py
 
 `-p/--profile` を指定した場合、スクリプト内部で前回 `aws sso login` を実行した日時を参照し、設定されたセッション維持時間を超えていれば `aws sso logout` -> `aws sso login --profile <profile>` を実行します。
 
-有効期間内でも AWS 側で SSO セッションが失効し、`The SSO session associated with this profile has expired or is otherwise invalid.` が返る場合があります。その場合は `~/.connect_to_fargate/state.json` の該当プロファイルのログイン記録を削除し、`aws sso logout` -> `aws sso login --profile <profile>` を実行してブラウザログイン画面を再表示した上で 1 回だけ自動再試行します。
+有効期間内でも AWS 側で SSO セッションが失効し、`The SSO session associated with this profile has expired or is otherwise invalid.` が返る場合があります。その場合は `~/.connect_to_fargate/state.json` の該当プロファイルのログイン記録を削除し、`aws sso logout` -> `aws sso login --profile <profile>` を実行してブラウザログイン画面を再表示した上で1回だけ自動再試行します。
 
 `-p/--profile` を省略する場合は、従来通り `AWS_PROFILE` を設定してください。
 

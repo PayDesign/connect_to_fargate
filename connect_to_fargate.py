@@ -716,7 +716,7 @@ def main(argv=None):
         profile_name and
         is_invalid_sso_session_error(diagnostic_text)
       ):
-        logger.warning('AWS SSO セッション失効を検知したため、再ログイン後に 1 回だけ再試行します')
+        logger.warning('AWS SSO セッション失効を検知したため、再ログイン後に1回だけ再試行します')
         recover_invalid_sso_session(logger, profile_name)
         run_main_flow(args, logger, logfile)
       else:
