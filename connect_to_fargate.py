@@ -12,6 +12,10 @@ import shutil
 import json
 
 DEFAULT_SSO_SESSION_DURATION_HOURS = 12
+SSO_SESSION_INVALID_MARKERS = (
+  'The SSO session associated with this profile has expired or is otherwise invalid.',
+  'Token has expired and refresh failed',
+)
 
 # ログ出力設定関数
 def setLogger():
@@ -133,6 +137,27 @@ def record_sso_login(profile_name, logged_in_at=None):
     'last_sso_login_at': (logged_in_at or datetime.datetime.now(datetime.timezone.utc)).isoformat()
   }
   save_json_file(get_state_path(), state)
+
+
+def clear_sso_login_record(profile_name):
+  state = load_sso_state()
+  profiles = state.get('profiles', {})
+  if profile_name not in profiles:
+    return False
+  del profiles[profile_name]
+  state['profiles'] = profiles
+  save_json_file(get_state_path(), state)
+  return True
+
+
+def is_invalid_sso_session_error(*texts):
+  normalized_texts = [text for text in texts if text]
+  return any(
+    marker in text
+    for marker in SSO_SESSION_INVALID_MARKERS
+    for text in normalized_texts
+  )
+
 
 def selected_answer(choices, message):
   import json
@@ -306,6 +331,25 @@ def ensure_aws_sso_login(logger, profile_name, session_duration_hours, force_log
       last_login_at.isoformat(),
     )
   )
+
+
+def recover_invalid_sso_session(logger, profile_name):
+  removed = clear_sso_login_record(profile_name)
+  if removed:
+    logger.warning(
+      'SSO セッション失効を検知したため、ログイン記録を削除しました: profile={}, state={}'.format(
+        profile_name,
+        get_state_path(),
+      )
+    )
+  else:
+    logger.warning(
+      'SSO セッション失効を検知しました。ログイン記録は見つかりませんでしたが、再ログインを実行します: profile={}'.format(
+        profile_name
+      )
+    )
+  run_aws_sso_logout(logger)
+  run_aws_sso_login(logger, profile_name)
 
 
 # クラスター名のチェック
@@ -596,65 +640,93 @@ def ecsExecute(logger, cluster_name, service_name, task_name, container_name, sh
 def view_help():
   print(build_parser().format_help().strip())
 
+
+def run_main_flow(args, logger, logfile):
+  profile_name = resolve_aws_profile(args.profile)
+  session_duration_hours = load_sso_session_duration_hours()
+  ensure_aws_sso_login(logger, profile_name, session_duration_hours, args.force_login)
+
+  ## 初期値の定義
+  cluster_name = args.cluster or ''
+  service_name = args.service if args.service is not None else ''
+  task_name = args.task or ''
+  container_name = args.container or ''
+  shell_cmd = args.cmd
+  force_connect = args.force
+  logger.info('処理を開始します')
+  logger.info('AWS プロファイル: {}\n'.format(profile_name))
+
+  ## 引数で指定がない場合に設定する関数を実行する
+  if cluster_name == '':
+    cluster_name = setCluster(logger)
+
+  if service_name == '':
+    if checkCluster(cluster_name):
+      service_name = setService(logger, cluster_name)
+    else:
+      raise Exception('正しいクラスター名を指定してください。')
+
+  if task_name == '':
+    if checkCluster(cluster_name) and \
+       checkService(cluster_name, service_name):
+      task_name = setTask(logger, cluster_name, service_name)
+    else:
+      raise Exception('正しいクラスター名またはサービス名を指定してください。')
+
+  if container_name == '':
+    if checkCluster(cluster_name) and \
+       checkService(cluster_name, service_name) and \
+       checkTask(cluster_name, service_name, task_name):
+      container_name = setContainer(logger, cluster_name, task_name)
+    else:
+      raise Exception('正しいクラスター名またはサービス名またはタスク名を指定してください。')
+
+  ## cluster_name, service_name, task_name, container_nameの実在確認（最終）
+  if not checkCluster(cluster_name):
+    raise Exception('正しいクラスター名を指定してください。')
+  if not checkService(cluster_name, service_name):
+    raise Exception('正しいサービス名を指定してください。')
+  if not checkTask(cluster_name, service_name, task_name):
+    raise Exception('正しいタスク名を指定してください。')
+  if not checkContainer(cluster_name, task_name, container_name):
+    raise Exception('正しいコンテナ名を指定してください。')
+
+  ## Fargate接続関数を実行する
+  ecsExecute(logger, cluster_name, service_name, task_name, container_name, shell_cmd, logfile, force_connect)
+
+
 # 主処理
 def main(argv=None):
+  logger = None
+  logfile = None
   try:
     parser = build_parser()
     args = parser.parse_args(argv)
     logger, logfile = setLogger()
-    profile_name = resolve_aws_profile(args.profile)
-    session_duration_hours = load_sso_session_duration_hours()
-    ensure_aws_sso_login(logger, profile_name, session_duration_hours, args.force_login)
-
-    ## 初期値の定義
-    cluster_name = args.cluster or ''
-    service_name = args.service if args.service is not None else ''
-    task_name = args.task or ''
-    container_name = args.container or ''
-    shell_cmd = args.cmd
-    force_connect = args.force
-    logger.info('処理を開始します')
-    logger.info('AWS プロファイル: {}\n'.format(profile_name))
-
-    ## 引数で指定がない場合に設定する関数を実行する
-    if cluster_name == '':
-      cluster_name    = setCluster(logger)
-
-    if service_name == '':
-      if checkCluster(cluster_name):
-        service_name    = setService(logger, cluster_name)
-      else :
-        raise Exception('正しいクラスター名を指定してください。')
-
-    if task_name == '':
-      if checkCluster(cluster_name) and \
-         checkService(cluster_name, service_name):
-        task_name       = setTask(logger, cluster_name, service_name)
-      else :
-        raise Exception('正しいクラスター名またはサービス名を指定してください。')
-
-    if container_name == '':
-      if checkCluster(cluster_name) and \
-         checkService(cluster_name, service_name) and \
-         checkTask(cluster_name, service_name, task_name):
-        container_name  = setContainer(logger, cluster_name, task_name)
-      else :
-        raise Exception('正しいクラスター名またはサービス名またはタスク名を指定してください。')
-
-    ## cluster_name, service_name, task_name, container_nameの実在確認（最終）
-    if not checkCluster(cluster_name):
-      raise Exception('正しいクラスター名を指定してください。')
-    if not checkService(cluster_name, service_name):
-      raise Exception('正しいサービス名を指定してください。')
-    if not checkTask(cluster_name, service_name, task_name):
-      raise Exception('正しいタスク名を指定してください。')
-    if not checkContainer(cluster_name, task_name, container_name):
-      raise Exception('正しいコンテナ名を指定してください。')
-
-    ## Fargate接続関数を実行する
-    ecsExecute(logger, cluster_name, service_name, task_name, container_name, shell_cmd, logfile, force_connect)
+    try:
+      run_main_flow(args, logger, logfile)
+    except Exception as e:
+      diagnostic_text = '{}\n{}\n{}'.format(
+        e,
+        traceback.format_exc(),
+        read_log_tail(logfile),
+      )
+      profile_name = os.environ.get('AWS_PROFILE') or args.profile
+      if (
+        profile_name and
+        is_invalid_sso_session_error(diagnostic_text)
+      ):
+        logger.warning('AWS SSO セッション失効を検知したため、再ログイン後に 1 回だけ再試行します')
+        recover_invalid_sso_session(logger, profile_name)
+        run_main_flow(args, logger, logfile)
+      else:
+        raise
   except Exception as e:
-    logger.error("処理を終了します\nエラー詳細: {}\n{}".format(e, traceback.format_exc()))
+    error_message = "処理を終了します\nエラー詳細: {}\n{}".format(e, traceback.format_exc())
+    if logger:
+      logger.error(error_message)
+    else:
+      print(error_message, file=sys.stderr)
     exit(255)
   return
 
