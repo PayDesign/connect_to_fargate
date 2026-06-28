@@ -134,23 +134,13 @@ $ mkdir -p ~/.connect_to_fargate/log
 $ connect_to_fargate.py
 ```
 
-`-p/--profile` を指定した場合、スクリプト内部で前回 `aws sso login` を実行した日時を参照し、設定されたセッション維持時間を超えていれば `aws sso logout` -> `aws sso login --profile <profile>` を実行します。
+`-p/--profile` を指定した場合、スクリプト内部で `~/.aws/sso/cache/*.json` の SSO キャッシュを参照します。対象プロファイルに一致するキャッシュが存在しない、または `expiresAt` を過ぎている場合は `aws sso logout` -> `aws sso login --profile <profile>` を実行します。
 
-有効期間内でも AWS 側で SSO セッションが失効し、`The SSO session associated with this profile has expired or is otherwise invalid.` が返る場合があります。その場合は `~/.connect_to_fargate/state.json` の該当プロファイルのログイン記録を削除し、`aws sso logout` -> `aws sso login --profile <profile>` を実行してブラウザログイン画面を再表示した上で1回だけ自動再試行します。
+キャッシュ上は有効でも AWS 側で SSO セッションが失効し、`The SSO session associated with this profile has expired or is otherwise invalid.` が返る場合があります。その場合は `aws sso logout` -> `aws sso login --profile <profile>` を実行してブラウザログイン画面を再表示した上で1回だけ自動再試行します。
 
 `-p/--profile` を省略する場合は、従来通り `AWS_PROFILE` を設定してください。
 
-セッション維持時間は `~/.connect_to_fargate/config.json` の `sso_session_duration_hours` で時間単位に指定できます。設定ファイルが存在しない場合、デフォルトは `12` 時間です。
-
-例:
-
-```json
-{
-  "sso_session_duration_hours": 12
-}
-```
-
-前回ログイン日時は `~/.connect_to_fargate/state.json` にプロファイルごとに保存されます。
+SSO セッションの有効期限は AWS CLI の SSO キャッシュ `expiresAt` を利用して判定します。
 
 ※connect_to_fargate.py_(日時).logにログが出力されます。
 

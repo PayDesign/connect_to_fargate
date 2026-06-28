@@ -10,8 +10,9 @@ import signal
 import shlex
 import shutil
 import json
+import glob
+import configparser
 
-DEFAULT_SSO_SESSION_DURATION_HOURS = 12
 SSO_SESSION_INVALID_MARKERS = (
   'The SSO session associated with this profile has expired or is otherwise invalid.',
   'Token has expired and refresh failed',
@@ -71,12 +72,12 @@ def get_app_dir():
   return os.path.join(os.path.expanduser('~'), '.{}'.format(get_app_name()))
 
 
-def get_config_path():
-  return os.path.join(get_app_dir(), 'config.json')
+def get_aws_config_path():
+  return os.path.join(os.path.expanduser('~'), '.aws', 'config')
 
 
-def get_state_path():
-  return os.path.join(get_app_dir(), 'state.json')
+def get_aws_sso_cache_dir():
+  return os.path.join(os.path.expanduser('~'), '.aws', 'sso', 'cache')
 
 
 def load_json_file(path, default):
@@ -86,68 +87,123 @@ def load_json_file(path, default):
     return json.load(f)
 
 
-def save_json_file(path, data):
-  os.makedirs(os.path.dirname(path), exist_ok=True)
-  with open(path, 'w', encoding='utf-8') as f:
-    json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def load_sso_session_duration_hours():
-  config = load_json_file(get_config_path(), {})
-  duration_hours = config.get('sso_session_duration_hours', DEFAULT_SSO_SESSION_DURATION_HOURS)
-  try:
-    duration_hours = float(duration_hours)
-  except (TypeError, ValueError):
-    raise Exception(
-      '設定ファイル `{}` の `sso_session_duration_hours` は時間単位の数値で指定してください。'.format(
-        get_config_path()
-      )
-    )
-  if duration_hours <= 0:
-    raise Exception(
-      '設定ファイル `{}` の `sso_session_duration_hours` は 0 より大きい値を指定してください。'.format(
-        get_config_path()
-      )
-    )
-  return duration_hours
-
-
-def load_sso_state():
-  return load_json_file(get_state_path(), {'profiles': {}})
-
-
-def get_last_sso_login_at(profile_name):
-  state = load_sso_state()
-  profile_state = state.get('profiles', {}).get(profile_name, {})
-  last_login_at = profile_state.get('last_sso_login_at')
-  if not last_login_at:
+def normalize_url(url):
+  if not url:
     return None
+  return url.rstrip('/')
+
+
+def parse_aws_timestamp(value, label):
+  if not value:
+    raise Exception('日時が空です: {}'.format(label))
+  normalized_value = value
+  if normalized_value.endswith('Z'):
+    normalized_value = normalized_value[:-1] + '+00:00'
   try:
-    return datetime.datetime.fromisoformat(last_login_at)
+    parsed = datetime.datetime.fromisoformat(normalized_value)
   except ValueError:
+    raise Exception('日時形式が不正です: {} ({})'.format(label, value))
+  if parsed.tzinfo is None:
+    parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+  return parsed.astimezone(datetime.timezone.utc)
+
+
+def load_aws_profile_sso_settings(profile_name):
+  aws_config_path = get_aws_config_path()
+  if not os.path.exists(aws_config_path):
+    raise Exception('AWS config が見つかりません: {}'.format(aws_config_path))
+
+  config = configparser.RawConfigParser()
+  config.read(aws_config_path, encoding='utf-8')
+
+  profile_section = 'default' if profile_name == 'default' else 'profile {}'.format(profile_name)
+  if not config.has_section(profile_section):
+    raise Exception('AWS config にプロファイルが見つかりません: {}'.format(profile_section))
+
+  start_url = config.get(profile_section, 'sso_start_url', fallback=None)
+  issuer_url = config.get(profile_section, 'sso_issuer_url', fallback=None)
+  sso_region = config.get(profile_section, 'sso_region', fallback=None)
+  session_name = config.get(profile_section, 'sso_session', fallback=None)
+
+  if session_name:
+    session_section = 'sso-session {}'.format(session_name)
+    if not config.has_section(session_section):
+      raise Exception('AWS config に SSO セッション定義が見つかりません: {}'.format(session_section))
+    start_url = start_url or config.get(session_section, 'sso_start_url', fallback=None)
+    issuer_url = issuer_url or config.get(session_section, 'sso_issuer_url', fallback=None)
+    sso_region = sso_region or config.get(session_section, 'sso_region', fallback=None)
+
+  if not start_url and not issuer_url:
     raise Exception(
-      '状態ファイル `{}` の `last_sso_login_at` が不正です。'.format(get_state_path())
+      'AWS config の SSO 設定が不足しています。`sso_start_url` または `sso_issuer_url` を確認してください: {}'.format(
+        profile_section
+      )
     )
+  if not sso_region:
+    raise Exception('AWS config の `sso_region` が未設定です: {}'.format(profile_section))
 
-
-def record_sso_login(profile_name, logged_in_at=None):
-  state = load_sso_state()
-  profiles = state.setdefault('profiles', {})
-  profiles[profile_name] = {
-    'last_sso_login_at': (logged_in_at or datetime.datetime.now(datetime.timezone.utc)).isoformat()
+  return {
+    'profile_section': profile_section,
+    'sso_start_url': start_url,
+    'sso_issuer_url': issuer_url,
+    'sso_region': sso_region,
   }
-  save_json_file(get_state_path(), state)
 
 
-def clear_sso_login_record(profile_name):
-  state = load_sso_state()
-  profiles = state.get('profiles', {})
-  if profile_name not in profiles:
-    return False
-  del profiles[profile_name]
-  state['profiles'] = profiles
-  save_json_file(get_state_path(), state)
-  return True
+def get_sso_cached_login(profile_name):
+  settings = load_aws_profile_sso_settings(profile_name)
+  cache_dir = get_aws_sso_cache_dir()
+  if not os.path.isdir(cache_dir):
+    return None
+
+  profile_urls = {
+    url for url in (
+      normalize_url(settings['sso_start_url']),
+      normalize_url(settings['sso_issuer_url']),
+    ) if url
+  }
+  candidates = []
+  for path in glob.glob(os.path.join(cache_dir, '*.json')):
+    try:
+      cache = load_json_file(path, None)
+    except Exception:
+      continue
+    if not isinstance(cache, dict):
+      continue
+    if not cache.get('accessToken') or not cache.get('expiresAt'):
+      continue
+    cache_region = cache.get('region')
+    if cache_region and cache_region != settings['sso_region']:
+      continue
+    cache_urls = {
+      url for url in (
+        normalize_url(cache.get('startUrl')),
+        normalize_url(cache.get('issuerUrl')),
+      ) if url
+    }
+    if not cache_urls or cache_urls.isdisjoint(profile_urls):
+      continue
+    candidates.append({
+      'path': path,
+      'expires_at': parse_aws_timestamp(cache['expiresAt'], path),
+    })
+
+  if not candidates:
+    return None
+  return max(candidates, key=lambda candidate: candidate['expires_at'])
+
+
+def format_timedelta(delta):
+  total_seconds = int(delta.total_seconds())
+  sign = '-' if total_seconds < 0 else ''
+  total_seconds = abs(total_seconds)
+  hours, rem = divmod(total_seconds, 3600)
+  minutes, seconds = divmod(rem, 60)
+  if hours:
+    return '{}{}h{}m'.format(sign, hours, minutes)
+  if minutes:
+    return '{}{}m{}s'.format(sign, minutes, seconds)
+  return '{}{}s'.format(sign, seconds)
 
 
 def is_invalid_sso_session_error(*texts):
@@ -275,7 +331,6 @@ def run_aws_sso_login(logger, profile_name):
   login_result = subprocess.run(login_cmd)
   if login_result.returncode != 0:
     raise Exception('aws sso login に失敗しました。profile={}'.format(profile_name))
-  record_sso_login(profile_name)
   logger.info('AWS SSO ログインが完了しました: profile={}'.format(profile_name))
 
 
@@ -290,35 +345,32 @@ def run_aws_sso_logout(logger):
   logger.info('AWS SSO ログアウトが完了しました')
 
 
-def ensure_aws_sso_login(logger, profile_name, session_duration_hours, force_login):
-  last_login_at = get_last_sso_login_at(profile_name)
-  logger.info(
-    'SSO セッション維持時間: {}時間 (config: {})'.format(
-      session_duration_hours,
-      get_config_path(),
-    )
-  )
-
+def ensure_aws_sso_login(logger, profile_name, force_login):
   if force_login:
     logger.info('`--force-login` が指定されたため、SSO セッションを再作成します')
     run_aws_sso_logout(logger)
     run_aws_sso_login(logger, profile_name)
     return
 
-  if last_login_at is None:
-    logger.info('前回の AWS SSO ログイン記録がないため、ログインを実行します')
+  cached_login = get_sso_cached_login(profile_name)
+  if cached_login is None:
+    logger.info(
+      '一致する AWS SSO キャッシュが見つからないため、ログインを実行します: profile={}, cache_dir={}'.format(
+        profile_name,
+        get_aws_sso_cache_dir(),
+      )
+    )
     run_aws_sso_login(logger, profile_name)
     return
 
-  if last_login_at.tzinfo is None:
-    last_login_at = last_login_at.replace(tzinfo=datetime.timezone.utc)
-
-  elapsed = datetime.datetime.now(datetime.timezone.utc) - last_login_at.astimezone(datetime.timezone.utc)
-  session_limit = datetime.timedelta(hours=session_duration_hours)
-  if elapsed >= session_limit:
+  expires_at = cached_login['expires_at']
+  remaining = expires_at - datetime.datetime.now(datetime.timezone.utc)
+  if remaining <= datetime.timedelta(seconds=0):
     logger.info(
-      '前回の AWS SSO ログインから {} を超過したため、再ログインします'.format(
-        session_limit
+      'AWS SSO キャッシュの有効期限を超過したため、再ログインします: profile={}, expires_at={}, cache={}'.format(
+        profile_name,
+        expires_at.isoformat(),
+        cached_login['path'],
       )
     )
     run_aws_sso_logout(logger)
@@ -326,28 +378,22 @@ def ensure_aws_sso_login(logger, profile_name, session_duration_hours, force_log
     return
 
   logger.info(
-    'AWS SSO ログイン記録は有効期間内です: profile={}, last_login_at={}'.format(
+    'AWS SSO セッションは有効です: profile={}, expires_at={}, remaining={}, cache={}'.format(
       profile_name,
-      last_login_at.isoformat(),
+      expires_at.isoformat(),
+      format_timedelta(remaining),
+      cached_login['path'],
     )
   )
 
 
 def recover_invalid_sso_session(logger, profile_name):
-  removed = clear_sso_login_record(profile_name)
-  if removed:
-    logger.warning(
-      'SSO セッション失効を検知したため、ログイン記録を削除しました: profile={}, state={}'.format(
-        profile_name,
-        get_state_path(),
-      )
+  logger.warning(
+    'SSO セッション失効を検知したため、AWS SSO キャッシュを再取得します: profile={}, cache_dir={}'.format(
+      profile_name,
+      get_aws_sso_cache_dir(),
     )
-  else:
-    logger.warning(
-      'SSO セッション失効を検知しました。ログイン記録は見つかりませんでしたが、再ログインを実行します: profile={}'.format(
-        profile_name
-      )
-    )
+  )
   run_aws_sso_logout(logger)
   run_aws_sso_login(logger, profile_name)
 
@@ -643,8 +689,7 @@ def view_help():
 
 def run_main_flow(args, logger, logfile):
   profile_name = resolve_aws_profile(args.profile)
-  session_duration_hours = load_sso_session_duration_hours()
-  ensure_aws_sso_login(logger, profile_name, session_duration_hours, args.force_login)
+  ensure_aws_sso_login(logger, profile_name, args.force_login)
 
   ## 初期値の定義
   cluster_name = args.cluster or ''
