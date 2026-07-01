@@ -142,7 +142,7 @@ $ connect_to_fargate.py
 
 SSO セッションの有効期限は AWS CLI の SSO キャッシュ `expiresAt` を利用して判定します。
 
-※connect_to_fargate.py_(日時).logにログが出力されます。
+※`connect_to_fargate.py_{cluster_name}_{service_name}_{container_name}_(日時).log` の形式でログが出力されます。
 
 ※引数に以下を利用できるように追加しました。
 
@@ -234,7 +234,7 @@ exit
 
 Exiting session with sessionId: ecs-execute-command-08107c57e1eb5fee9.
 
-CompletedProcess(args='/usr/local/bin/aws ecs execute-command --cluster test-cluster --task 87b5a48c8b99450d9dea5443c863ee5d --container nginx --interactive --command /bin/bash | tee ./connect_to_fargate.py_20220629090944872720.log', returncode=0)
+CompletedProcess(args='/usr/local/bin/aws ecs execute-command --cluster test-cluster --task 87b5a48c8b99450d9dea5443c863ee5d --container nginx --interactive --command /bin/bash | tee ./connect_to_fargate.py_test-cluster_test-service_nginx_20220629090944872720.log', returncode=0)
 Fargateからログアウトしました
 ```
 

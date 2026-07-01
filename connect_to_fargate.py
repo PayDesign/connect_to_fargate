@@ -18,24 +18,92 @@ SSO_SESSION_INVALID_MARKERS = (
   'Token has expired and refresh failed',
 )
 
-# ログ出力設定関数
-def setLogger():
-  script_name = __file__.split('/')[-1]
+def sanitize_logfile_component(value, default_value):
+  text = default_value if value in [None, ''] else str(value)
+  sanitized = []
+  for char in text:
+    if char.isalnum() or char in '._-':
+      sanitized.append(char)
+    else:
+      sanitized.append('_')
+  return ''.join(sanitized)
+
+
+def build_logfile_path(script_name, dt, cluster_name=None, service_name=None, container_name=None):
   log_dir_name = os.path.join(get_app_dir(), 'log')
   os.makedirs(log_dir_name, exist_ok=True)
-  log_dir_base = log_dir_name + '/'
 
-  dt = datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')
-  logfile_name = log_dir_base + '{}_{}.log'.format(script_name, dt)
+  if cluster_name is None and service_name is None and container_name is None:
+    logfile_name = '{}_{}.log'.format(script_name, dt)
+  else:
+    cluster_part = sanitize_logfile_component(cluster_name, 'unknown-cluster')
+    service_part = sanitize_logfile_component(service_name, 'standalone-tasks')
+    container_part = sanitize_logfile_component(container_name, 'unknown-container')
+    logfile_name = '{}_{}_{}_{}_{}.log'.format(
+      script_name,
+      cluster_part,
+      service_part,
+      container_part,
+      dt,
+    )
+  return os.path.join(log_dir_name, logfile_name)
 
-  logger = logging.getLogger(script_name)
-  logger.setLevel(logging.INFO)
 
+def create_file_handler(logfile_name):
   fmt = logging.Formatter('%(asctime)s:%(name)s:%(levelname)s:%(message)s')
   handler = logging.FileHandler(logfile_name)
   handler.setLevel(logging.INFO)
   handler.setFormatter(fmt)
-  logger.addHandler(handler)
+  return handler
+
+
+def get_file_handler(logger):
+  for handler in logger.handlers:
+    if isinstance(handler, logging.FileHandler):
+      return handler
+  return None
+
+
+def update_logfile_path(logger, current_logfile, cluster_name, service_name, container_name):
+  script_name = getattr(logger, 'script_name', os.path.basename(__file__))
+  dt = getattr(logger, 'log_timestamp')
+  next_logfile = build_logfile_path(
+    script_name,
+    dt,
+    cluster_name,
+    service_name,
+    container_name,
+  )
+  if current_logfile == next_logfile:
+    return current_logfile
+
+  file_handler = get_file_handler(logger)
+  if file_handler is None:
+    raise Exception('ログファイルハンドラが見つかりません。')
+
+  file_handler.flush()
+  logger.removeHandler(file_handler)
+  file_handler.close()
+  os.replace(current_logfile, next_logfile)
+
+  logger.addHandler(create_file_handler(next_logfile))
+  logger.logfile_name = next_logfile
+  return next_logfile
+
+
+# ログ出力設定関数
+def setLogger():
+  script_name = __file__.split('/')[-1]
+  dt = datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')
+  logfile_name = build_logfile_path(script_name, dt)
+
+  logger = logging.getLogger(script_name)
+  logger.setLevel(logging.INFO)
+  logger.script_name = script_name
+  logger.log_timestamp = dt
+  logger.logfile_name = logfile_name
+
+  logger.addHandler(create_file_handler(logfile_name))
 
   fmt_stdout = logging.Formatter('%(message)s')
   handler_stdout= logging.StreamHandler()
@@ -736,8 +804,17 @@ def run_main_flow(args, logger, logfile):
   if not checkContainer(cluster_name, task_name, container_name):
     raise Exception('正しいコンテナ名を指定してください。')
 
+  logfile = update_logfile_path(
+    logger,
+    logfile,
+    cluster_name,
+    service_name,
+    container_name,
+  )
+
   ## Fargate接続関数を実行する
   ecsExecute(logger, cluster_name, service_name, task_name, container_name, shell_cmd, logfile, force_connect)
+  return logfile
 
 
 # 主処理
@@ -749,8 +826,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     logger, logfile = setLogger()
     try:
-      run_main_flow(args, logger, logfile)
+      logfile = run_main_flow(args, logger, logfile)
     except Exception as e:
+      logfile = getattr(logger, 'logfile_name', logfile)
       diagnostic_text = '{}\n{}\n{}'.format(
         e,
         traceback.format_exc(),
@@ -763,7 +841,7 @@ def main(argv=None):
       ):
         logger.warning('AWS SSO セッション失効を検知したため、再ログイン後に1回だけ再試行します')
         recover_invalid_sso_session(logger, profile_name)
-        run_main_flow(args, logger, logfile)
+        logfile = run_main_flow(args, logger, logfile)
       else:
         raise
   except Exception as e:
