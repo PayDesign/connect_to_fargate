@@ -134,9 +134,9 @@ $ mkdir -p ~/.connect_to_fargate/log
 $ connect_to_fargate.py
 ```
 
-`-p/--profile` を指定した場合、スクリプト内部で `~/.aws/sso/cache/*.json` の SSO キャッシュを参照します。対象プロファイルに一致するキャッシュが存在しない、または `expiresAt` を過ぎている場合は `aws sso logout` -> `aws sso login --profile <profile>` を実行します。
+`-p/--profile` を指定した場合、スクリプト内部で `~/.aws/sso/cache/` の SSO キャッシュを参照します。キャッシュ判定は `botocore` / `boto3` と同じく `sso_session` または `sso_start_url` から求めたキャッシュキーの JSON を利用します。対象プロファイルのキャッシュが存在しない、または `expiresAt` を過ぎている場合は `aws sso logout` -> `aws sso login --profile <profile>` を実行します。
 
-キャッシュ上は有効でも AWS 側で SSO セッションが失効し、`The SSO session associated with this profile has expired or is otherwise invalid.` が返る場合があります。その場合は `aws sso logout` -> `aws sso login --profile <profile>` を実行してブラウザログイン画面を再表示した上で1回だけ自動再試行します。
+キャッシュ上は有効でも AWS 側で SSO セッションが失効し、`The SSO session associated with this profile has expired or is otherwise invalid.` や `Error loading SSO Token: Token for ... does not exist` が返る場合があります。その場合は `aws sso logout` -> `aws sso login --profile <profile>` を実行してブラウザログイン画面を再表示した上で1回だけ自動再試行します。
 
 `-p/--profile` を省略する場合は、従来通り `AWS_PROFILE` を設定してください。
 

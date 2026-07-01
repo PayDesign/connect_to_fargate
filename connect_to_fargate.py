@@ -10,12 +10,13 @@ import signal
 import shlex
 import shutil
 import json
-import glob
 import configparser
+import hashlib
 
 SSO_SESSION_INVALID_MARKERS = (
   'The SSO session associated with this profile has expired or is otherwise invalid.',
   'Token has expired and refresh failed',
+  'Error loading SSO Token: Token for ',
 )
 
 def sanitize_logfile_component(value, default_value):
@@ -215,7 +216,15 @@ def load_aws_profile_sso_settings(profile_name):
     'sso_start_url': start_url,
     'sso_issuer_url': issuer_url,
     'sso_region': sso_region,
+    'sso_session': session_name,
   }
+
+
+def build_botocore_sso_token_cache_key(sso_start_url, sso_session):
+  cache_key_source = sso_session or sso_start_url
+  if not cache_key_source:
+    return None
+  return hashlib.sha1(cache_key_source.encode('utf-8')).hexdigest()
 
 
 def get_sso_cached_login(profile_name):
@@ -224,41 +233,28 @@ def get_sso_cached_login(profile_name):
   if not os.path.isdir(cache_dir):
     return None
 
-  profile_urls = {
-    url for url in (
-      normalize_url(settings['sso_start_url']),
-      normalize_url(settings['sso_issuer_url']),
-    ) if url
-  }
-  candidates = []
-  for path in glob.glob(os.path.join(cache_dir, '*.json')):
-    try:
-      cache = load_json_file(path, None)
-    except Exception:
-      continue
-    if not isinstance(cache, dict):
-      continue
-    if not cache.get('accessToken') or not cache.get('expiresAt'):
-      continue
-    cache_region = cache.get('region')
-    if cache_region and cache_region != settings['sso_region']:
-      continue
-    cache_urls = {
-      url for url in (
-        normalize_url(cache.get('startUrl')),
-        normalize_url(cache.get('issuerUrl')),
-      ) if url
-    }
-    if not cache_urls or cache_urls.isdisjoint(profile_urls):
-      continue
-    candidates.append({
-      'path': path,
-      'expires_at': parse_aws_timestamp(cache['expiresAt'], path),
-    })
-
-  if not candidates:
+  cache_key = build_botocore_sso_token_cache_key(
+    settings['sso_start_url'],
+    settings['sso_session'],
+  )
+  if not cache_key:
     return None
-  return max(candidates, key=lambda candidate: candidate['expires_at'])
+
+  path = os.path.join(cache_dir, '{}.json'.format(cache_key))
+  cache = load_json_file(path, None)
+  if not isinstance(cache, dict):
+    return None
+  if not cache.get('accessToken') or not cache.get('expiresAt'):
+    return None
+
+  cache_region = cache.get('region')
+  if cache_region and cache_region != settings['sso_region']:
+    return None
+
+  return {
+    'path': path,
+    'expires_at': parse_aws_timestamp(cache['expiresAt'], path),
+  }
 
 
 def format_timedelta(delta):
