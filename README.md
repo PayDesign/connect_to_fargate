@@ -142,7 +142,12 @@ $ connect_to_fargate.py
 
 SSO セッションの有効期限は AWS CLI の SSO キャッシュ `expiresAt` を利用して判定します。
 
-※`connect_to_fargate.py_{cluster_name}_{service_name}_{container_name}_(日時).log` の形式でログが出力されます。
+※アプリケーションログは常に `~/.connect_to_fargate/log/` 配下へ出力されます。
+実行コマンドが `connect_to_fargate.py` でも `fargatessh` でも、ログディレクトリは共通です。
+ファイル名は常に `connect_to_fargate_{cluster_name}_{service_name}_{container_name}_(日時).log` の形式です。
+
+※`aws ecs execute-command` のセッション出力も常に `~/.connect_to_fargate/log/` 配下へ出力されます。
+ファイル名は `connect_to_fargate_{cluster_name}_{service_name}_{container_name}_(日時)_session.log` の形式です。
 
 ※引数に以下を利用できるように追加しました。
 

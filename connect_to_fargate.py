@@ -18,6 +18,8 @@ SSO_SESSION_INVALID_MARKERS = (
   'Token has expired and refresh failed',
   'Error loading SSO Token: Token for ',
 )
+APP_DIR_NAME = '.connect_to_fargate'
+LOG_FILE_PREFIX = 'connect_to_fargate'
 
 def sanitize_logfile_component(value, default_value):
   text = default_value if value in [None, ''] else str(value)
@@ -50,6 +52,15 @@ def build_logfile_path(script_name, dt, cluster_name=None, service_name=None, co
   return os.path.join(log_dir_name, logfile_name)
 
 
+def build_session_logfile_path(logfile_name):
+  base, ext = os.path.splitext(logfile_name)
+  return '{}_session{}'.format(base, ext or '.log')
+
+
+def announce_logfile_path(logfile_name, prefix='ログファイル'):
+  print('{}: {}'.format(prefix, logfile_name), file=sys.stdout, flush=True)
+
+
 def create_file_handler(logfile_name):
   fmt = logging.Formatter('%(asctime)s:%(name)s:%(levelname)s:%(message)s')
   handler = logging.FileHandler(logfile_name)
@@ -66,7 +77,7 @@ def get_file_handler(logger):
 
 
 def update_logfile_path(logger, current_logfile, cluster_name, service_name, container_name):
-  script_name = getattr(logger, 'script_name', os.path.basename(__file__))
+  script_name = getattr(logger, 'script_name', LOG_FILE_PREFIX)
   dt = getattr(logger, 'log_timestamp')
   next_logfile = build_logfile_path(
     script_name,
@@ -89,14 +100,16 @@ def update_logfile_path(logger, current_logfile, cluster_name, service_name, con
 
   logger.addHandler(create_file_handler(next_logfile))
   logger.logfile_name = next_logfile
+  announce_logfile_path(next_logfile, 'ログファイル更新')
   return next_logfile
 
 
 # ログ出力設定関数
 def setLogger():
-  script_name = __file__.split('/')[-1]
+  script_name = LOG_FILE_PREFIX
   dt = datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')
   logfile_name = build_logfile_path(script_name, dt)
+  announce_logfile_path(logfile_name)
 
   logger = logging.getLogger(script_name)
   logger.setLevel(logging.INFO)
@@ -138,7 +151,7 @@ def get_app_name():
 
 
 def get_app_dir():
-  return os.path.join(os.path.expanduser('~'), '.{}'.format(get_app_name()))
+  return os.path.join(os.path.expanduser('~'), APP_DIR_NAME)
 
 
 def get_aws_config_path():
@@ -692,6 +705,7 @@ def setContainer(logger, cluster_name, task_name):
 
 # FARGATEへ接続
 def ecsExecute(logger, cluster_name, service_name, task_name, container_name, shell_cmd, logfile, force_connect):
+  session_logfile = build_session_logfile_path(logfile)
   ## 接続先確認のメッセージを出力
   str  = '以下のFargateに接続します\n'
   str += '----------------------------------------\n'
@@ -715,15 +729,17 @@ def ecsExecute(logger, cluster_name, service_name, task_name, container_name, sh
     #  task = task_name
     #)
     #/bin/bashの場合セッションが切れてしまうためsubprocessを利用する方式に変更
+    logger.info('アプリケーションログ: {}'.format(logfile))
+    logger.info('セッションログ: {}'.format(session_logfile))
     logger.info('Fargateにログインします')
     aws_cli = get_aws_cli_path()
     cmd  = 'set -o pipefail; {} ecs execute-command '.format(shlex.quote(aws_cli))
     cmd += '--cluster {} '.format(shlex.quote(cluster_name))
     cmd += '--task {} '.format(shlex.quote(task_name))
     cmd += '--container {} '.format(shlex.quote(container_name))
-    cmd += '--interactive --command {} 2>&1 | tee {}'.format(
+    cmd += '--interactive --command {} 2>&1 | tee -a {}'.format(
       shlex.quote(shell_cmd),
-      shlex.quote(logfile),
+      shlex.quote(session_logfile),
     )
 
     ## Ctrl+C(SIGINTシグナル)を無視
