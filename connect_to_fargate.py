@@ -136,6 +136,19 @@ def read_log_tail(logfile, max_chars=8000):
   return content[-max_chars:]
 
 
+def read_log_tails(logfiles, max_chars=8000):
+  seen = set()
+  tails = []
+  for logfile in logfiles:
+    if not logfile or logfile in seen:
+      continue
+    seen.add(logfile)
+    tail = read_log_tail(logfile, max_chars)
+    if tail:
+      tails.append('===== {} =====\n{}'.format(logfile, tail))
+  return '\n'.join(tails)
+
+
 def build_execute_command_error_message(output):
   if (
     'AccessDeniedException' in output and
@@ -706,6 +719,7 @@ def setContainer(logger, cluster_name, task_name):
 # FARGATEへ接続
 def ecsExecute(logger, cluster_name, service_name, task_name, container_name, shell_cmd, logfile, force_connect):
   session_logfile = build_session_logfile_path(logfile)
+  logger.session_logfile_name = session_logfile
   ## 接続先確認のメッセージを出力
   str  = '以下のFargateに接続します\n'
   str += '----------------------------------------\n'
@@ -754,7 +768,7 @@ def ecsExecute(logger, cluster_name, service_name, task_name, container_name, sh
       stderr=sys.stderr,
     )
     if out.returncode != 0:
-      error_output = read_log_tail(logfile)
+      error_output = read_log_tails([logfile, session_logfile])
       friendly_message = build_execute_command_error_message(error_output)
       if friendly_message:
         logger.error(friendly_message)
@@ -841,10 +855,11 @@ def main(argv=None):
       logfile = run_main_flow(args, logger, logfile)
     except Exception as e:
       logfile = getattr(logger, 'logfile_name', logfile)
+      diagnostic_logfile = getattr(logger, 'session_logfile_name', None)
       diagnostic_text = '{}\n{}\n{}'.format(
         e,
         traceback.format_exc(),
-        read_log_tail(logfile),
+        read_log_tails([logfile, diagnostic_logfile]),
       )
       profile_name = os.environ.get('AWS_PROFILE') or args.profile
       if (
