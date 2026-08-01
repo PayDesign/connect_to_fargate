@@ -182,12 +182,6 @@ def load_json_file(path, default):
     return json.load(f)
 
 
-def normalize_url(url):
-  if not url:
-    return None
-  return url.rstrip('/')
-
-
 def parse_aws_timestamp(value, label):
   if not value:
     raise Exception('日時が空です: {}'.format(label))
