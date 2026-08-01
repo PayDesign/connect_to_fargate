@@ -239,7 +239,7 @@ exit
 
 Exiting session with sessionId: ecs-execute-command-08107c57e1eb5fee9.
 
-CompletedProcess(args='/usr/local/bin/aws ecs execute-command --cluster test-cluster --task 87b5a48c8b99450d9dea5443c863ee5d --container nginx --interactive --command /bin/bash | tee ./connect_to_fargate.py_test-cluster_test-service_nginx_20220629090944872720.log', returncode=0)
+CompletedProcess(args='/usr/local/bin/aws ecs execute-command --cluster test-cluster --task 87b5a48c8b99450d9dea5443c863ee5d --container nginx --interactive --command /bin/bash | tee -a ~/.connect_to_fargate/log/connect_to_fargate_test-cluster_test-service_nginx_20220629090944872720_session.log', returncode=0)
 Fargateからログアウトしました
 ```
 
