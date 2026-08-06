@@ -134,25 +134,20 @@ $ mkdir -p ~/.connect_to_fargate/log
 $ connect_to_fargate.py
 ```
 
-`-p/--profile` を指定した場合、スクリプト内部で前回 `aws sso login` を実行した日時を参照し、設定されたセッション維持時間を超えていれば `aws sso logout` -> `aws sso login --profile <profile>` を実行します。
+`-p/--profile` を指定した場合、スクリプト内部で `~/.aws/sso/cache/` の SSO キャッシュを参照します。キャッシュ判定は `botocore` / `boto3` と同じく `sso_session` または `sso_start_url` から求めたキャッシュキーの JSON を利用します。対象プロファイルのキャッシュが存在しない、または `expiresAt` を過ぎている場合は `aws sso logout` -> `aws sso login --profile <profile>` を実行します。
 
-有効期間内でも AWS 側で SSO セッションが失効し、`The SSO session associated with this profile has expired or is otherwise invalid.` が返る場合があります。その場合は `~/.connect_to_fargate/state.json` の該当プロファイルのログイン記録を削除し、`aws sso logout` -> `aws sso login --profile <profile>` を実行してブラウザログイン画面を再表示した上で1回だけ自動再試行します。
+キャッシュ上は有効でも AWS 側で SSO セッションが失効し、`The SSO session associated with this profile has expired or is otherwise invalid.` や `Error loading SSO Token: Token for ... does not exist` が返る場合があります。その場合は `aws sso logout` -> `aws sso login --profile <profile>` を実行してブラウザログイン画面を再表示した上で1回だけ自動再試行します。
 
 `-p/--profile` を省略する場合は、従来通り `AWS_PROFILE` を設定してください。
 
-セッション維持時間は `~/.connect_to_fargate/config.json` の `sso_session_duration_hours` で時間単位に指定できます。設定ファイルが存在しない場合、デフォルトは `12` 時間です。
+SSO セッションの有効期限は AWS CLI の SSO キャッシュ `expiresAt` を利用して判定します。
 
-例:
+※アプリケーションログは常に `~/.connect_to_fargate/log/` 配下へ出力されます。
+実行コマンドが `connect_to_fargate.py` でも `fargatessh` でも、ログディレクトリは共通です。
+ファイル名は常に `connect_to_fargate_{cluster_name}_{service_name}_{container_name}_(日時).log` の形式です。
 
-```json
-{
-  "sso_session_duration_hours": 12
-}
-```
-
-前回ログイン日時は `~/.connect_to_fargate/state.json` にプロファイルごとに保存されます。
-
-※connect_to_fargate.py_(日時).logにログが出力されます。
+※`aws ecs execute-command` のセッション出力も常に `~/.connect_to_fargate/log/` 配下へ出力されます。
+ファイル名は `connect_to_fargate_{cluster_name}_{service_name}_{container_name}_(日時)_session.log` の形式です。
 
 ※引数に以下を利用できるように追加しました。
 
@@ -244,7 +239,7 @@ exit
 
 Exiting session with sessionId: ecs-execute-command-08107c57e1eb5fee9.
 
-CompletedProcess(args='/usr/local/bin/aws ecs execute-command --cluster test-cluster --task 87b5a48c8b99450d9dea5443c863ee5d --container nginx --interactive --command /bin/bash | tee ./connect_to_fargate.py_20220629090944872720.log', returncode=0)
+CompletedProcess(args='/usr/local/bin/aws ecs execute-command --cluster test-cluster --task 87b5a48c8b99450d9dea5443c863ee5d --container nginx --interactive --command /bin/bash | tee -a ~/.connect_to_fargate/log/connect_to_fargate_test-cluster_test-service_nginx_20220629090944872720_session.log', returncode=0)
 Fargateからログアウトしました
 ```
 

@@ -10,31 +10,114 @@ import signal
 import shlex
 import shutil
 import json
+import configparser
+import hashlib
 
-DEFAULT_SSO_SESSION_DURATION_HOURS = 12
 SSO_SESSION_INVALID_MARKERS = (
   'The SSO session associated with this profile has expired or is otherwise invalid.',
   'Token has expired and refresh failed',
+  'Error loading SSO Token: Token for ',
 )
+APP_DIR_NAME = '.connect_to_fargate'
+LOG_FILE_PREFIX = 'connect_to_fargate'
 
-# ログ出力設定関数
-def setLogger():
-  script_name = __file__.split('/')[-1]
+def sanitize_logfile_component(value, default_value):
+  text = default_value if value in [None, ''] else str(value)
+  sanitized = []
+  for char in text:
+    if char.isalnum() or char in '._-':
+      sanitized.append(char)
+    else:
+      sanitized.append('_')
+  return ''.join(sanitized)
+
+
+def build_logfile_path(script_name, dt, cluster_name=None, service_name=None, container_name=None):
   log_dir_name = os.path.join(get_app_dir(), 'log')
   os.makedirs(log_dir_name, exist_ok=True)
-  log_dir_base = log_dir_name + '/'
 
-  dt = datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')
-  logfile_name = log_dir_base + '{}_{}.log'.format(script_name, dt)
+  if cluster_name is None and service_name is None and container_name is None:
+    logfile_name = '{}_{}.log'.format(script_name, dt)
+  else:
+    cluster_part = sanitize_logfile_component(cluster_name, 'unknown-cluster')
+    service_part = sanitize_logfile_component(service_name, 'standalone-tasks')
+    container_part = sanitize_logfile_component(container_name, 'unknown-container')
+    logfile_name = '{}_{}_{}_{}_{}.log'.format(
+      script_name,
+      cluster_part,
+      service_part,
+      container_part,
+      dt,
+    )
+  return os.path.join(log_dir_name, logfile_name)
 
-  logger = logging.getLogger(script_name)
-  logger.setLevel(logging.INFO)
 
+def build_session_logfile_path(logfile_name):
+  base, ext = os.path.splitext(logfile_name)
+  return '{}_session{}'.format(base, ext or '.log')
+
+
+def announce_logfile_path(logfile_name, prefix='ログファイル'):
+  print('{}: {}'.format(prefix, logfile_name), file=sys.stdout, flush=True)
+
+
+def create_file_handler(logfile_name):
   fmt = logging.Formatter('%(asctime)s:%(name)s:%(levelname)s:%(message)s')
   handler = logging.FileHandler(logfile_name)
   handler.setLevel(logging.INFO)
   handler.setFormatter(fmt)
-  logger.addHandler(handler)
+  return handler
+
+
+def get_file_handler(logger):
+  for handler in logger.handlers:
+    if isinstance(handler, logging.FileHandler):
+      return handler
+  return None
+
+
+def update_logfile_path(logger, current_logfile, cluster_name, service_name, container_name):
+  script_name = getattr(logger, 'script_name', LOG_FILE_PREFIX)
+  dt = getattr(logger, 'log_timestamp')
+  next_logfile = build_logfile_path(
+    script_name,
+    dt,
+    cluster_name,
+    service_name,
+    container_name,
+  )
+  if current_logfile == next_logfile:
+    return current_logfile
+
+  file_handler = get_file_handler(logger)
+  if file_handler is None:
+    raise Exception('ログファイルハンドラが見つかりません。')
+
+  file_handler.flush()
+  logger.removeHandler(file_handler)
+  file_handler.close()
+  os.replace(current_logfile, next_logfile)
+
+  logger.addHandler(create_file_handler(next_logfile))
+  logger.logfile_name = next_logfile
+  announce_logfile_path(next_logfile, 'ログファイル更新')
+  return next_logfile
+
+
+# ログ出力設定関数
+def setLogger():
+  script_name = LOG_FILE_PREFIX
+  dt = datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')
+  logfile_name = build_logfile_path(script_name, dt)
+  announce_logfile_path(logfile_name)
+
+  logger = logging.getLogger(script_name)
+  logger.setLevel(logging.INFO)
+  logger.script_name = script_name
+  logger.log_timestamp = dt
+  logger.logfile_name = logfile_name
+
+  logger.addHandler(create_file_handler(logfile_name))
 
   fmt_stdout = logging.Formatter('%(message)s')
   handler_stdout= logging.StreamHandler()
@@ -53,6 +136,19 @@ def read_log_tail(logfile, max_chars=8000):
   return content[-max_chars:]
 
 
+def read_log_tails(logfiles, max_chars=8000):
+  seen = set()
+  tails = []
+  for logfile in logfiles:
+    if not logfile or logfile in seen:
+      continue
+    seen.add(logfile)
+    tail = read_log_tail(logfile, max_chars)
+    if tail:
+      tails.append('===== {} =====\n{}'.format(logfile, tail))
+  return '\n'.join(tails)
+
+
 def build_execute_command_error_message(output):
   if (
     'AccessDeniedException' in output and
@@ -68,15 +164,15 @@ def get_app_name():
 
 
 def get_app_dir():
-  return os.path.join(os.path.expanduser('~'), '.{}'.format(get_app_name()))
+  return os.path.join(os.path.expanduser('~'), APP_DIR_NAME)
 
 
-def get_config_path():
-  return os.path.join(get_app_dir(), 'config.json')
+def get_aws_config_path():
+  return os.path.join(os.path.expanduser('~'), '.aws', 'config')
 
 
-def get_state_path():
-  return os.path.join(get_app_dir(), 'state.json')
+def get_aws_sso_cache_dir():
+  return os.path.join(os.path.expanduser('~'), '.aws', 'sso', 'cache')
 
 
 def load_json_file(path, default):
@@ -86,68 +182,112 @@ def load_json_file(path, default):
     return json.load(f)
 
 
-def save_json_file(path, data):
-  os.makedirs(os.path.dirname(path), exist_ok=True)
-  with open(path, 'w', encoding='utf-8') as f:
-    json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def load_sso_session_duration_hours():
-  config = load_json_file(get_config_path(), {})
-  duration_hours = config.get('sso_session_duration_hours', DEFAULT_SSO_SESSION_DURATION_HOURS)
+def parse_aws_timestamp(value, label):
+  if not value:
+    raise Exception('日時が空です: {}'.format(label))
+  normalized_value = value
+  if normalized_value.endswith('Z'):
+    normalized_value = normalized_value[:-1] + '+00:00'
   try:
-    duration_hours = float(duration_hours)
-  except (TypeError, ValueError):
-    raise Exception(
-      '設定ファイル `{}` の `sso_session_duration_hours` は時間単位の数値で指定してください。'.format(
-        get_config_path()
-      )
-    )
-  if duration_hours <= 0:
-    raise Exception(
-      '設定ファイル `{}` の `sso_session_duration_hours` は 0 より大きい値を指定してください。'.format(
-        get_config_path()
-      )
-    )
-  return duration_hours
-
-
-def load_sso_state():
-  return load_json_file(get_state_path(), {'profiles': {}})
-
-
-def get_last_sso_login_at(profile_name):
-  state = load_sso_state()
-  profile_state = state.get('profiles', {}).get(profile_name, {})
-  last_login_at = profile_state.get('last_sso_login_at')
-  if not last_login_at:
-    return None
-  try:
-    return datetime.datetime.fromisoformat(last_login_at)
+    parsed = datetime.datetime.fromisoformat(normalized_value)
   except ValueError:
+    raise Exception('日時形式が不正です: {} ({})'.format(label, value))
+  if parsed.tzinfo is None:
+    parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+  return parsed.astimezone(datetime.timezone.utc)
+
+
+def load_aws_profile_sso_settings(profile_name):
+  aws_config_path = get_aws_config_path()
+  if not os.path.exists(aws_config_path):
+    raise Exception('AWS config が見つかりません: {}'.format(aws_config_path))
+
+  config = configparser.RawConfigParser()
+  config.read(aws_config_path, encoding='utf-8')
+
+  profile_section = 'default' if profile_name == 'default' else 'profile {}'.format(profile_name)
+  if not config.has_section(profile_section):
+    raise Exception('AWS config にプロファイルが見つかりません: {}'.format(profile_section))
+
+  start_url = config.get(profile_section, 'sso_start_url', fallback=None)
+  issuer_url = config.get(profile_section, 'sso_issuer_url', fallback=None)
+  sso_region = config.get(profile_section, 'sso_region', fallback=None)
+  session_name = config.get(profile_section, 'sso_session', fallback=None)
+
+  if session_name:
+    session_section = 'sso-session {}'.format(session_name)
+    if not config.has_section(session_section):
+      raise Exception('AWS config に SSO セッション定義が見つかりません: {}'.format(session_section))
+    start_url = start_url or config.get(session_section, 'sso_start_url', fallback=None)
+    issuer_url = issuer_url or config.get(session_section, 'sso_issuer_url', fallback=None)
+    sso_region = sso_region or config.get(session_section, 'sso_region', fallback=None)
+
+  if not start_url and not issuer_url:
     raise Exception(
-      '状態ファイル `{}` の `last_sso_login_at` が不正です。'.format(get_state_path())
+      'AWS config の SSO 設定が不足しています。`sso_start_url` または `sso_issuer_url` を確認してください: {}'.format(
+        profile_section
+      )
     )
+  if not sso_region:
+    raise Exception('AWS config の `sso_region` が未設定です: {}'.format(profile_section))
 
-
-def record_sso_login(profile_name, logged_in_at=None):
-  state = load_sso_state()
-  profiles = state.setdefault('profiles', {})
-  profiles[profile_name] = {
-    'last_sso_login_at': (logged_in_at or datetime.datetime.now(datetime.timezone.utc)).isoformat()
+  return {
+    'profile_section': profile_section,
+    'sso_start_url': start_url,
+    'sso_issuer_url': issuer_url,
+    'sso_region': sso_region,
+    'sso_session': session_name,
   }
-  save_json_file(get_state_path(), state)
 
 
-def clear_sso_login_record(profile_name):
-  state = load_sso_state()
-  profiles = state.get('profiles', {})
-  if profile_name not in profiles:
-    return False
-  del profiles[profile_name]
-  state['profiles'] = profiles
-  save_json_file(get_state_path(), state)
-  return True
+def build_botocore_sso_token_cache_key(sso_start_url, sso_session):
+  cache_key_source = sso_session or sso_start_url
+  if not cache_key_source:
+    return None
+  return hashlib.sha1(cache_key_source.encode('utf-8')).hexdigest()
+
+
+def get_sso_cached_login(profile_name):
+  settings = load_aws_profile_sso_settings(profile_name)
+  cache_dir = get_aws_sso_cache_dir()
+  if not os.path.isdir(cache_dir):
+    return None
+
+  cache_key = build_botocore_sso_token_cache_key(
+    settings['sso_start_url'],
+    settings['sso_session'],
+  )
+  if not cache_key:
+    return None
+
+  path = os.path.join(cache_dir, '{}.json'.format(cache_key))
+  cache = load_json_file(path, None)
+  if not isinstance(cache, dict):
+    return None
+  if not cache.get('accessToken') or not cache.get('expiresAt'):
+    return None
+
+  cache_region = cache.get('region')
+  if cache_region and cache_region != settings['sso_region']:
+    return None
+
+  return {
+    'path': path,
+    'expires_at': parse_aws_timestamp(cache['expiresAt'], path),
+  }
+
+
+def format_timedelta(delta):
+  total_seconds = int(delta.total_seconds())
+  sign = '-' if total_seconds < 0 else ''
+  total_seconds = abs(total_seconds)
+  hours, rem = divmod(total_seconds, 3600)
+  minutes, seconds = divmod(rem, 60)
+  if hours:
+    return '{}{}h{}m'.format(sign, hours, minutes)
+  if minutes:
+    return '{}{}m{}s'.format(sign, minutes, seconds)
+  return '{}{}s'.format(sign, seconds)
 
 
 def is_invalid_sso_session_error(*texts):
@@ -275,7 +415,6 @@ def run_aws_sso_login(logger, profile_name):
   login_result = subprocess.run(login_cmd)
   if login_result.returncode != 0:
     raise Exception('aws sso login に失敗しました。profile={}'.format(profile_name))
-  record_sso_login(profile_name)
   logger.info('AWS SSO ログインが完了しました: profile={}'.format(profile_name))
 
 
@@ -290,35 +429,32 @@ def run_aws_sso_logout(logger):
   logger.info('AWS SSO ログアウトが完了しました')
 
 
-def ensure_aws_sso_login(logger, profile_name, session_duration_hours, force_login):
-  last_login_at = get_last_sso_login_at(profile_name)
-  logger.info(
-    'SSO セッション維持時間: {}時間 (config: {})'.format(
-      session_duration_hours,
-      get_config_path(),
-    )
-  )
-
+def ensure_aws_sso_login(logger, profile_name, force_login):
   if force_login:
     logger.info('`--force-login` が指定されたため、SSO セッションを再作成します')
     run_aws_sso_logout(logger)
     run_aws_sso_login(logger, profile_name)
     return
 
-  if last_login_at is None:
-    logger.info('前回の AWS SSO ログイン記録がないため、ログインを実行します')
+  cached_login = get_sso_cached_login(profile_name)
+  if cached_login is None:
+    logger.info(
+      '一致する AWS SSO キャッシュが見つからないため、ログインを実行します: profile={}, cache_dir={}'.format(
+        profile_name,
+        get_aws_sso_cache_dir(),
+      )
+    )
     run_aws_sso_login(logger, profile_name)
     return
 
-  if last_login_at.tzinfo is None:
-    last_login_at = last_login_at.replace(tzinfo=datetime.timezone.utc)
-
-  elapsed = datetime.datetime.now(datetime.timezone.utc) - last_login_at.astimezone(datetime.timezone.utc)
-  session_limit = datetime.timedelta(hours=session_duration_hours)
-  if elapsed >= session_limit:
+  expires_at = cached_login['expires_at']
+  remaining = expires_at - datetime.datetime.now(datetime.timezone.utc)
+  if remaining <= datetime.timedelta(seconds=0):
     logger.info(
-      '前回の AWS SSO ログインから {} を超過したため、再ログインします'.format(
-        session_limit
+      'AWS SSO キャッシュの有効期限を超過したため、再ログインします: profile={}, expires_at={}, cache={}'.format(
+        profile_name,
+        expires_at.isoformat(),
+        cached_login['path'],
       )
     )
     run_aws_sso_logout(logger)
@@ -326,28 +462,22 @@ def ensure_aws_sso_login(logger, profile_name, session_duration_hours, force_log
     return
 
   logger.info(
-    'AWS SSO ログイン記録は有効期間内です: profile={}, last_login_at={}'.format(
+    'AWS SSO セッションは有効です: profile={}, expires_at={}, remaining={}, cache={}'.format(
       profile_name,
-      last_login_at.isoformat(),
+      expires_at.isoformat(),
+      format_timedelta(remaining),
+      cached_login['path'],
     )
   )
 
 
 def recover_invalid_sso_session(logger, profile_name):
-  removed = clear_sso_login_record(profile_name)
-  if removed:
-    logger.warning(
-      'SSO セッション失効を検知したため、ログイン記録を削除しました: profile={}, state={}'.format(
-        profile_name,
-        get_state_path(),
-      )
+  logger.warning(
+    'SSO セッション失効を検知したため、AWS SSO キャッシュを再取得します: profile={}, cache_dir={}'.format(
+      profile_name,
+      get_aws_sso_cache_dir(),
     )
-  else:
-    logger.warning(
-      'SSO セッション失効を検知しました。ログイン記録は見つかりませんでしたが、再ログインを実行します: profile={}'.format(
-        profile_name
-      )
-    )
+  )
   run_aws_sso_logout(logger)
   run_aws_sso_login(logger, profile_name)
 
@@ -582,6 +712,8 @@ def setContainer(logger, cluster_name, task_name):
 
 # FARGATEへ接続
 def ecsExecute(logger, cluster_name, service_name, task_name, container_name, shell_cmd, logfile, force_connect):
+  session_logfile = build_session_logfile_path(logfile)
+  logger.session_logfile_name = session_logfile
   ## 接続先確認のメッセージを出力
   str  = '以下のFargateに接続します\n'
   str += '----------------------------------------\n'
@@ -605,15 +737,17 @@ def ecsExecute(logger, cluster_name, service_name, task_name, container_name, sh
     #  task = task_name
     #)
     #/bin/bashの場合セッションが切れてしまうためsubprocessを利用する方式に変更
+    logger.info('アプリケーションログ: {}'.format(logfile))
+    logger.info('セッションログ: {}'.format(session_logfile))
     logger.info('Fargateにログインします')
     aws_cli = get_aws_cli_path()
     cmd  = 'set -o pipefail; {} ecs execute-command '.format(shlex.quote(aws_cli))
     cmd += '--cluster {} '.format(shlex.quote(cluster_name))
     cmd += '--task {} '.format(shlex.quote(task_name))
     cmd += '--container {} '.format(shlex.quote(container_name))
-    cmd += '--interactive --command {} 2>&1 | tee {}'.format(
+    cmd += '--interactive --command {} 2>&1 | tee -a {}'.format(
       shlex.quote(shell_cmd),
-      shlex.quote(logfile),
+      shlex.quote(session_logfile),
     )
 
     ## Ctrl+C(SIGINTシグナル)を無視
@@ -628,7 +762,7 @@ def ecsExecute(logger, cluster_name, service_name, task_name, container_name, sh
       stderr=sys.stderr,
     )
     if out.returncode != 0:
-      error_output = read_log_tail(logfile)
+      error_output = read_log_tails([logfile, session_logfile])
       friendly_message = build_execute_command_error_message(error_output)
       if friendly_message:
         logger.error(friendly_message)
@@ -643,8 +777,7 @@ def view_help():
 
 def run_main_flow(args, logger, logfile):
   profile_name = resolve_aws_profile(args.profile)
-  session_duration_hours = load_sso_session_duration_hours()
-  ensure_aws_sso_login(logger, profile_name, session_duration_hours, args.force_login)
+  ensure_aws_sso_login(logger, profile_name, args.force_login)
 
   ## 初期値の定義
   cluster_name = args.cluster or ''
@@ -691,8 +824,17 @@ def run_main_flow(args, logger, logfile):
   if not checkContainer(cluster_name, task_name, container_name):
     raise Exception('正しいコンテナ名を指定してください。')
 
+  logfile = update_logfile_path(
+    logger,
+    logfile,
+    cluster_name,
+    service_name,
+    container_name,
+  )
+
   ## Fargate接続関数を実行する
   ecsExecute(logger, cluster_name, service_name, task_name, container_name, shell_cmd, logfile, force_connect)
+  return logfile
 
 
 # 主処理
@@ -704,12 +846,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     logger, logfile = setLogger()
     try:
-      run_main_flow(args, logger, logfile)
+      logfile = run_main_flow(args, logger, logfile)
     except Exception as e:
+      logfile = getattr(logger, 'logfile_name', logfile)
+      diagnostic_logfile = getattr(logger, 'session_logfile_name', None)
       diagnostic_text = '{}\n{}\n{}'.format(
         e,
         traceback.format_exc(),
-        read_log_tail(logfile),
+        read_log_tails([logfile, diagnostic_logfile]),
       )
       profile_name = os.environ.get('AWS_PROFILE') or args.profile
       if (
@@ -718,7 +862,7 @@ def main(argv=None):
       ):
         logger.warning('AWS SSO セッション失効を検知したため、再ログイン後に1回だけ再試行します')
         recover_invalid_sso_session(logger, profile_name)
-        run_main_flow(args, logger, logfile)
+        logfile = run_main_flow(args, logger, logfile)
       else:
         raise
   except Exception as e:
