@@ -371,6 +371,7 @@ def build_parser():
       'Examples:\n'
       '  connect_to_fargate.py -p profile\n'
       '  connect_to_fargate.py -p profile -c cluster -s service -t app -f\n'
+      '  connect_to_fargate.py -p profile -c cluster -s service -t app --task-selection latest --cmd "php artisan --version" -f\n'
       '  connect_to_fargate.py --profile profile --cluster cluster --task task-id --container app'
     ),
     formatter_class=argparse.RawTextHelpFormatter,
@@ -378,7 +379,12 @@ def build_parser():
   parser.add_argument('-p', '--profile', help='AWS プロファイル名。未指定時は AWS_PROFILE を利用')
   parser.add_argument('-c', '--cluster', help='クラスター名')
   parser.add_argument('-s', '--service', help='サービス名')
-  parser.add_argument('--task', help='タスク名')
+  task_group = parser.add_mutually_exclusive_group()
+  task_group.add_argument('--task', help='タスク名')
+  task_group.add_argument(
+    '--task-selection', choices=['prompt', 'latest', 'oldest'], default='prompt',
+    help='複数タスクの選択方法（既定: prompt）。1件の場合は常に自動選択',
+  )
   parser.add_argument('-t', '--container', help='コンテナ名')
   parser.add_argument('--cmd', default='/bin/bash', help='コンテナで実行するコマンド')
   parser.add_argument('-f', '--force', action='store_true', help='接続確認なしでログインを行う')
@@ -601,71 +607,82 @@ def setService(logger, cluster_name):
   else:
     raise Exception('正しいサービス名を選択してください。')
 
-# タスク名のチェック
-def checkTask(cluster_name, service_name, task_name):
+# 稼働中のタスク候補を全ページから取得する
+def get_task_candidates(cluster_name, service_name):
   ecs = get_ecs_client()
+  request = dict(cluster=cluster_name, desiredStatus='RUNNING', maxResults=100)
+  if service_name is not None:
+    request['serviceName'] = service_name
+  task_arns = []
+  while True:
+    response = ecs.list_tasks(**request)
+    task_arns.extend(response['taskArns'])
+    next_token = response.get('nextToken')
+    if not next_token:
+      break
+    request['nextToken'] = next_token
 
-  task_list = []
-  if service_name is None:
-    for task_arn in ecs.list_tasks(
-      cluster = cluster_name,
-      desiredStatus = 'RUNNING',
-      maxResults = 100
-    )['taskArns']:
-      task = task_arn.split('/')[len(task_arn.split('/')) - 1]
-      task_list.append(task)
-  else:
-    for task_arn in ecs.list_tasks(
-      cluster = cluster_name,
-      serviceName = service_name,
-      desiredStatus = 'RUNNING',
-      maxResults = 100
-    )['taskArns']:
-      task = task_arn.split('/')[len(task_arn.split('/')) - 1]
-      task_list.append(task)
+  task_arns = list(dict.fromkeys(task_arns))
+  candidates = []
+  for offset in range(0, len(task_arns), 100):
+    response = ecs.describe_tasks(cluster=cluster_name, tasks=task_arns[offset:offset + 100])
+    if response.get('failures'):
+      raise Exception('タスク情報の取得に失敗しました: {}'.format(response['failures']))
+    for task in response['tasks']:
+      if task.get('desiredStatus') != 'RUNNING' or task.get('lastStatus') != 'RUNNING':
+        continue
+      group = task.get('group', '')
+      if service_name is None:
+        if group.startswith('service:'):
+          continue
+      elif group != 'service:{}'.format(service_name):
+        continue
+      candidates.append(task)
+  return sorted(candidates, key=lambda task: task['taskArn'].rsplit('/', 1)[-1])
 
-  if task_name in task_list:
-    return True
-  else :
-    return False
+
+# タスク名のチェック（候補取得と同じ所属・稼働状態で検証する）
+def checkTask(cluster_name, service_name, task_name):
+  return any(
+    task['taskArn'].rsplit('/', 1)[-1] == task_name
+    for task in get_task_candidates(cluster_name, service_name)
+  )
 
 # タスク名の設定
-def setTask(logger, cluster_name, service_name):
-  ecs = get_ecs_client()
-
-  task_list = []
-  if service_name is None:
-    task_arn = ecs.list_tasks(
-      cluster = cluster_name,
-      desiredStatus = 'RUNNING',
-      maxResults = 100
-    )['taskArns']
-    task_details = ecs.describe_tasks(cluster=cluster_name, tasks=task_arn)
-    # スタンドアロンタスクをフィルタリング
-    for task in task_details['tasks']:
-      if not task['group'].startswith('service:'):
-        task_name = task['taskArn'].split('/')[len(task['taskArn'].split('/')) - 1]
-        task_list.append(task_name)
-  else:
-    for task_arn in ecs.list_tasks(
-      cluster = cluster_name,
-      serviceName = service_name,
-      desiredStatus = 'RUNNING',
-      maxResults = 100
-    )['taskArns']:
-      task_name = task_arn.split('/')[len(task_arn.split('/')) - 1]
-      task_list.append(task_name)
-  if len(task_list) == 0:
+def setTask(logger, cluster_name, service_name, selection='prompt'):
+  candidates = get_task_candidates(cluster_name, service_name)
+  if not candidates:
     logger.error('タスクが存在しません')
-    raise Exception('最初からやりなおしてください。')
+    raise Exception('稼働中のタスクが存在しません。')
+
+  if len(candidates) == 1:
+    selected_task = candidates[0]
+    reason = '候補が1件のため自動選択'
+  elif selection in ['latest', 'oldest']:
+    if any(task.get('startedAt') is None for task in candidates):
+      raise Exception('起動日時が不明なタスクがあるため、自動選択できません。--task で指定してください。')
+    direction = -1 if selection == 'latest' else 1
+    selected_task = min(candidates, key=lambda task: (
+      direction * task['startedAt'].timestamp(),
+      task['taskArn'].rsplit('/', 1)[-1],
+    ))
+    reason = 'ルールにより自動選択'
   else:
+    task_list = [task['taskArn'].rsplit('/', 1)[-1] for task in candidates]
     task_name = selected_answer(task_list, "接続先が存在するタスク名を選択してください")
+    selected_task = next(task for task in candidates if task['taskArn'].rsplit('/', 1)[-1] == task_name)
+    reason = '選択画面で選択'
+
+  task_name = selected_task['taskArn'].rsplit('/', 1)[-1]
+  started_at = selected_task.get('startedAt')
+  logger.info('タスク選択: 候補件数={}, ルール={}, 理由={}'.format(len(candidates), selection, reason))
+  logger.info('タスク名: {}'.format(task_name))
+  logger.info('起動日時: {}\n'.format(started_at.isoformat() if started_at else '不明'))
 
   if checkTask(cluster_name, service_name, task_name):
-    logger.info('タスク名: {}\n'.format(task_name))
     return task_name
   else :
-    raise Exception('正しいタスク名を選択してください。')
+    raise Exception('選択したタスクが稼働中ではありません。別タスクへの切り替えは行いません。')
 
 # コンテナ名のチェック
 def checkContainer(cluster_name, task_name, container_name):
@@ -802,7 +819,7 @@ def run_main_flow(args, logger, logfile):
   if task_name == '':
     if checkCluster(cluster_name) and \
        checkService(cluster_name, service_name):
-      task_name = setTask(logger, cluster_name, service_name)
+      task_name = setTask(logger, cluster_name, service_name, args.task_selection)
     else:
       raise Exception('正しいクラスター名またはサービス名を指定してください。')
 

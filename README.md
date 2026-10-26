@@ -157,7 +157,9 @@ SSO セッションの有効期限は AWS CLI の SSO キャッシュ `expiresAt
 
 --service=サービス名（指定ない場合は、対話型の選択画面に遷移）
 
---task=タスク名（指定ない場合は、対話型の選択画面に遷移）
+--task=タスク名（未指定時は、候補が1件なら自動選択、複数件なら選択ルールに従う）
+
+`--task-selection {prompt,latest,oldest}` 複数タスクの選択方法（既定値: `prompt`）。`--task` とは同時指定不可
 
 `-t, --container=コンテナ名`（指定ない場合は、対話型の選択画面に遷移）
 
@@ -177,9 +179,45 @@ $ connect_to_fargate.py --help
 
 ```
 usage: connect_to_fargate.py [-h] [-p PROFILE] [-c CLUSTER] [-s SERVICE]
-                             [--task TASK] [-t CONTAINER] [--cmd CMD] [-f]
-                             [--force-login]
+                             [--task TASK |
+                             --task-selection {prompt,latest,oldest}]
+                             [-t CONTAINER] [--cmd CMD] [-f] [--force-login]
 ```
+
+### タスクの自動選択
+
+`--task` を省略した場合、指定したサービス（または対話画面で選んだスタンドアロンタスク）のうち、`desiredStatus` と `lastStatus` がともに `RUNNING` のタスクを全ページから取得します。
+
+| 候補件数 | 動作 |
+| --- | --- |
+| 0件 | エラーで終了 |
+| 1件 | 選択画面を表示せず自動選択 |
+| 複数件 | `--task-selection` のルールに従って1件を選択 |
+
+| ルール | 複数件の場合の動作 |
+| --- | --- |
+| `prompt`（既定値） | 選択画面を表示 |
+| `latest` | 起動日時（`startedAt`）が最も新しいタスクを自動選択 |
+| `oldest` | 起動日時（`startedAt`）が最も古いタスクを自動選択 |
+
+起動日時が同じ場合は、タスクIDの昇順で先頭のタスクを選択します。`latest` はタスク定義の最新リビジョンを意味しません。複数件から日時で自動選択する際に起動日時が不明なタスクがあれば、エラーで終了します。その場合は `--task` でタスクIDを指定してください。
+
+```bash
+# 1件なら自動選択、複数件なら選択画面
+connect_to_fargate.py -p profile -c cluster -s service -t app
+
+# 複数件でも最新のタスクを自動選択し、接続確認を省略してコマンドを実行
+connect_to_fargate.py -p profile -c cluster -s service -t app \
+  --task-selection latest --cmd 'php artisan --version' -f
+
+# 最も古いタスクに対話ログイン
+connect_to_fargate.py -p profile -c cluster -s service -t app \
+  --task-selection oldest
+```
+
+候補件数、選択ルール、選択したタスクID、起動日時を表示・ログ出力します。選択後にタスクが停止した場合はエラーとし、別タスクへの自動切り替えは行いません。
+
+`-f` は接続確認だけを省略します。`--task-selection` はタスク選択にだけ適用されるため、クラスター・サービス・コンテナの未指定時は引き続き選択画面が表示されます。SSO の再ログインが必要な場合はブラウザでの認証も発生します。
 
 
 ### 実行結果（例１ 引数なし）
@@ -205,6 +243,7 @@ $ connect_to_fargate.py
 
 [?] 接続先が存在するタスク名を選択してください:
  ❯ 779933414f454c76960d15b37ab15f26
+   ae95d0c222424643be7ddd8e288b1229
 
 タスク名: 779933414f454c76960d15b37ab15f26
 
@@ -259,6 +298,7 @@ $ connect_to_fargate.py --cluster=default --container=web
 
 [?] 接続先が存在するタスク名を選択してください:
  ❯ 779933414f454c76960d15b37ab15f26
+   ae95d0c222424643be7ddd8e288b1229
 
 タスク名: 779933414f454c76960d15b37ab15f26
 
@@ -294,6 +334,7 @@ $ fargatessh -p profile -c default -t app -f
 
 [?] 接続先が存在するタスク名を選択してください:
  ❯ 779933414f454c76960d15b37ab15f26
+   ae95d0c222424643be7ddd8e288b1229
 
 タスク名: 779933414f454c76960d15b37ab15f26
 
