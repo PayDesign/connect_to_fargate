@@ -167,6 +167,8 @@ SSO セッションの有効期限は AWS CLI の SSO キャッシュ `expiresAt
 
 `-f, --force` 接続確認なしでログインを行う
 
+`-q, --quiet` 通常メッセージとログファイルのパス通知を画面に表示しない（ファイルへのログ保存は継続）
+
 `--force-login` SSO セッションを強制的に再ログインする（`aws sso logout` -> `aws sso login`）
 
 ※Ctrl + Cの挙動は変更しました（接続処理直前にSIGINTをSIG_IGNに変換する処理を追加）
@@ -181,7 +183,8 @@ $ connect_to_fargate.py --help
 usage: connect_to_fargate.py [-h] [-p PROFILE] [-c CLUSTER] [-s SERVICE]
                              [--task TASK |
                              --task-selection {prompt,latest,oldest}]
-                             [-t CONTAINER] [--cmd CMD] [-f] [--force-login]
+                             [-t CONTAINER] [--cmd CMD] [-f] [-q]
+                             [--force-login]
 ```
 
 ### タスクの自動選択
@@ -215,9 +218,20 @@ connect_to_fargate.py -p profile -c cluster -s service -t app \
   --task-selection oldest
 ```
 
-候補件数、選択ルール、選択したタスクID、起動日時を表示・ログ出力します。選択後にタスクが停止した場合はエラーとし、別タスクへの自動切り替えは行いません。
+候補件数、選択ルール、選択したタスクID、起動日時を表示・ログ出力します（`--quiet` 指定時はファイルへの記録のみ）。選択後にタスクが停止した場合はエラーとし、別タスクへの自動切り替えは行いません。
 
 `-f` は接続確認だけを省略します。`--task-selection` はタスク選択にだけ適用されるため、クラスター・サービス・コンテナの未指定時は引き続き選択画面が表示されます。SSO の再ログインが必要な場合はブラウザでの認証も発生します。
+
+### 通常メッセージの抑制
+
+`-q` または `--quiet` を指定すると、ログファイルのパス・更新通知、SSO の状態、処理開始、プロファイル、タスクの選択結果、接続先の案内、ログイン・ログアウトの案内など、ツール自身の通常メッセージを画面に表示しません。アプリケーションログとセッションログは従来どおり保存します。
+
+```bash
+connect_to_fargate.py -p mpfront -c cluster -s service -t app \
+  --task-selection latest --cmd 'php artisan --version' -f --quiet
+```
+
+警告・エラーは標準エラーに表示します。タスクなどの選択画面と接続確認、コンテナ内コマンドの実行結果、AWS CLI・Session Manager によるセッション開始／終了メッセージ、SSO ログイン時の認証案内は引き続き表示します。`--quiet` 自体は選択や確認を省略しません。
 
 
 ### 実行結果（例１ 引数なし）
