@@ -57,8 +57,9 @@ def build_session_logfile_path(logfile_name):
   return '{}_session{}'.format(base, ext or '.log')
 
 
-def announce_logfile_path(logfile_name, prefix='ログファイル'):
-  print('{}: {}'.format(prefix, logfile_name), file=sys.stdout, flush=True)
+def announce_logfile_path(logfile_name, prefix='ログファイル', quiet=False):
+  if not quiet:
+    print('{}: {}'.format(prefix, logfile_name), file=sys.stdout, flush=True)
 
 
 def create_file_handler(logfile_name):
@@ -100,28 +101,29 @@ def update_logfile_path(logger, current_logfile, cluster_name, service_name, con
 
   logger.addHandler(create_file_handler(next_logfile))
   logger.logfile_name = next_logfile
-  announce_logfile_path(next_logfile, 'ログファイル更新')
+  announce_logfile_path(next_logfile, 'ログファイル更新', quiet=getattr(logger, 'quiet', False))
   return next_logfile
 
 
 # ログ出力設定関数
-def setLogger():
+def setLogger(quiet=False):
   script_name = LOG_FILE_PREFIX
   dt = datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')
   logfile_name = build_logfile_path(script_name, dt)
-  announce_logfile_path(logfile_name)
+  announce_logfile_path(logfile_name, quiet=quiet)
 
   logger = logging.getLogger(script_name)
   logger.setLevel(logging.INFO)
   logger.script_name = script_name
   logger.log_timestamp = dt
   logger.logfile_name = logfile_name
+  logger.quiet = quiet
 
   logger.addHandler(create_file_handler(logfile_name))
 
   fmt_stdout = logging.Formatter('%(message)s')
   handler_stdout= logging.StreamHandler()
-  handler_stdout.setLevel(logging.INFO)
+  handler_stdout.setLevel(logging.WARNING if quiet else logging.INFO)
   handler_stdout.setFormatter(fmt_stdout)
   logger.addHandler(handler_stdout)
 
@@ -388,6 +390,10 @@ def build_parser():
   parser.add_argument('-t', '--container', help='コンテナ名')
   parser.add_argument('--cmd', default='/bin/bash', help='コンテナで実行するコマンド')
   parser.add_argument('-f', '--force', action='store_true', help='接続確認なしでログインを行う')
+  parser.add_argument(
+    '-q', '--quiet', action='store_true',
+    help='通常メッセージを非表示にする（警告・エラー、選択画面、セッション出力は表示）',
+  )
   parser.add_argument(
     '--force-login',
     action='store_true',
@@ -861,7 +867,7 @@ def main(argv=None):
   try:
     parser = build_parser()
     args = parser.parse_args(argv)
-    logger, logfile = setLogger()
+    logger, logfile = setLogger(quiet=args.quiet)
     try:
       logfile = run_main_flow(args, logger, logfile)
     except Exception as e:
