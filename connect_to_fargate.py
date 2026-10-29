@@ -105,8 +105,22 @@ def update_logfile_path(logger, current_logfile, cluster_name, service_name, con
   return next_logfile
 
 
+class ConsoleFormatter(logging.Formatter):
+  def __init__(self, show_traceback=False):
+    super().__init__('%(message)s')
+    self.show_traceback = show_traceback
+
+  def format(self, record):
+    if not self.show_traceback:
+      # ファイル用の例外情報とキャッシュを変更せず、画面表示だけを抑制する。
+      record = logging.makeLogRecord(record.__dict__)
+      record.exc_info = None
+      record.exc_text = None
+    return super().format(record)
+
+
 # ログ出力設定関数
-def setLogger(quiet=False):
+def setLogger(quiet=False, show_traceback=False):
   script_name = LOG_FILE_PREFIX
   dt = datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')
   logfile_name = build_logfile_path(script_name, dt)
@@ -121,7 +135,7 @@ def setLogger(quiet=False):
 
   logger.addHandler(create_file_handler(logfile_name))
 
-  fmt_stdout = logging.Formatter('%(message)s')
+  fmt_stdout = ConsoleFormatter(show_traceback=show_traceback)
   handler_stdout= logging.StreamHandler()
   handler_stdout.setLevel(logging.WARNING if quiet else logging.INFO)
   handler_stdout.setFormatter(fmt_stdout)
@@ -412,6 +426,10 @@ def build_parser():
   parser.add_argument(
     '-q', '--quiet', action='store_true',
     help='通常メッセージを非表示にする（警告・エラー、選択画面、セッション出力は表示）',
+  )
+  parser.add_argument(
+    '--traceback', action='store_true',
+    help='エラー時のTracebackを標準エラーに表示する（ログファイルには常に保存）',
   )
   parser.add_argument(
     '--force-login',
@@ -889,10 +907,11 @@ def run_main_flow(args, logger, logfile):
 def main(argv=None):
   logger = None
   logfile = None
+  args = None
   try:
     parser = build_parser()
     args = parser.parse_args(argv)
-    logger, logfile = setLogger(quiet=args.quiet)
+    logger, logfile = setLogger(quiet=args.quiet, show_traceback=args.traceback)
     try:
       logfile = run_main_flow(args, logger, logfile)
     except Exception as e:
@@ -914,11 +933,13 @@ def main(argv=None):
       else:
         raise
   except Exception as e:
-    error_message = "処理を終了します\nエラー詳細: {}\n{}".format(e, traceback.format_exc())
+    error_message = "処理を終了します\nエラー詳細: {}".format(e)
     if logger:
-      logger.error(error_message)
+      logger.error(error_message, exc_info=True)
     else:
       print(error_message, file=sys.stderr)
+      if args is not None and args.traceback:
+        traceback.print_exc(file=sys.stderr)
     exit(255)
   return
 
