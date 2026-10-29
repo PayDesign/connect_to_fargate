@@ -173,6 +173,8 @@ SSO セッションの有効期限は AWS CLI の SSO キャッシュ `expiresAt
 
 `-q, --quiet` 通常メッセージとログファイルのパス通知を画面に表示しない（ファイルへのログ保存は継続）
 
+`--traceback` エラー時のTracebackを標準エラーに表示する（省略時は非表示。ログファイルには常に保存）
+
 `--force-login` SSO セッションを強制的に再ログインする（`aws sso logout` -> `aws sso login`）
 
 ※Ctrl + Cの挙動は変更しました（接続処理直前にSIGINTをSIG_IGNに変換する処理を追加）
@@ -189,7 +191,7 @@ usage: connect_to_fargate.py [-h] [-p PROFILE] [-c CLUSTER] [-s SERVICE]
                              --task-selection {prompt,latest,oldest}]
                              [-t CONTAINER | --container-selection {prompt,auto}]
                              [--container-selection-fallback {error,prompt}]
-                             [--cmd CMD] [-f] [-q]
+                             [--cmd CMD] [-f] [-q] [--traceback]
                              [--force-login]
 ```
 
@@ -269,6 +271,16 @@ connect_to_fargate.py -p mpfront -c cluster -s service -t app \
 
 警告・エラーは標準エラーに表示します。タスクなどの選択画面と接続確認、コンテナ内コマンドの実行結果、AWS CLI・Session Manager によるセッション開始／終了メッセージ、SSO ログイン時の認証案内は引き続き表示します。`--quiet` 自体は選択や確認を省略しません。
 
+
+### エラー時のTraceback表示
+
+通常はエラーメッセージのみを標準エラーに表示します。`--traceback` を指定すると、例外の発生箇所を示すTracebackも表示します。ログファイルには指定の有無にかかわらずTracebackを保存します。ログ初期化に失敗してファイルへ保存できない場合も、画面への表示はこの指定に従います。
+
+```bash
+connect_to_fargate.py -p profile --traceback
+```
+
+`--quiet --traceback` と併用した場合も、エラーメッセージとTracebackは表示します。終了コード（エラー時は `255`）、引数エラーの表示、SSO失効時の再ログイン・再試行は従来どおりです。
 
 ### 実行結果（例１ 引数なし）
 

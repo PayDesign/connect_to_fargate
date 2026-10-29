@@ -73,6 +73,71 @@ class QuietTests(unittest.TestCase):
         self.assertEqual(self.stdout.getvalue(), '')
         self.assertIn('接続失敗', self.stderr.getvalue())
 
+    def test_traceback_visibility_and_file_preservation(self):
+        for quiet in (False, True):
+            for show_traceback in (False, True):
+                with self.subTest(quiet=quiet, show_traceback=show_traceback):
+                    flags = (['--quiet'] if quiet else []) + (['--traceback'] if show_traceback else [])
+                    self.stderr.truncate(0)
+                    self.stderr.seek(0)
+                    with patch.object(app, 'run_main_flow', side_effect=RuntimeError('接続失敗')):
+                        with self.assertRaises(SystemExit) as error:
+                            app.main(flags)
+                    self.assertEqual(error.exception.code, 255)
+                    output = self.stderr.getvalue()
+                    self.assertIn('処理を終了します\nエラー詳細: 接続失敗', output)
+                    self.assertEqual('Traceback (most recent call last):' in output, show_traceback)
+                    self.assertEqual('RuntimeError: 接続失敗' in output, show_traceback)
+                    contents = Path(self.logger.logfile_name).read_text()
+                    self.assertIn('Traceback (most recent call last):', contents)
+                    self.assertIn('RuntimeError: 接続失敗', contents)
+                    self.close_handlers()
+
+    def test_traceback_option_when_logger_initialization_fails(self):
+        for flags in ([], ['--traceback'], ['--quiet'], ['--quiet', '--traceback']):
+            with self.subTest(flags=flags):
+                self.stderr.truncate(0)
+                self.stderr.seek(0)
+                with patch.object(app, 'setLogger', side_effect=OSError('ログ作成失敗')):
+                    with self.assertRaises(SystemExit) as error:
+                        app.main(flags)
+                self.assertEqual(error.exception.code, 255)
+                self.assertIn('エラー詳細: ログ作成失敗', self.stderr.getvalue())
+                self.assertEqual('Traceback (most recent call last):' in self.stderr.getvalue(), '--traceback' in flags)
+
+    def test_console_formatting_does_not_strip_file_exception_information(self):
+        logger, logfile = app.setLogger()
+        # 画面用ハンドラが先でもファイルへのTraceback保存を維持する。
+        logger.handlers.reverse()
+        try:
+            raise RuntimeError('例外情報の保持')
+        except RuntimeError:
+            logger.error('エラー', exc_info=True)
+        self.assertEqual(self.stderr.getvalue(), 'エラー\n')
+        self.assertIn('RuntimeError: 例外情報の保持', Path(logfile).read_text())
+
+    def test_sso_recovery_is_preserved(self):
+        with patch.object(app, 'run_main_flow', side_effect=[RuntimeError('SSO失効'), None]) as flow, \
+                patch.object(app, 'is_invalid_sso_session_error', return_value=True) as check, \
+                patch.object(app, 'recover_invalid_sso_session') as recover:
+            app.main(['-p', 'profile', '--quiet'])
+        self.assertEqual(flow.call_count, 2)
+        self.assertIn('Traceback (most recent call last):', check.call_args.args[0])
+        recover.assert_called_once()
+        self.assertIn('再ログイン後に1回だけ再試行', self.stderr.getvalue())
+        self.assertNotIn('Traceback (most recent call last):', self.stderr.getvalue())
+
+    def test_argument_errors_keep_usage_without_traceback(self):
+        for flags in (['--unknown'], ['--traceback', '--unknown']):
+            with self.subTest(flags=flags):
+                self.stderr.truncate(0)
+                self.stderr.seek(0)
+                with self.assertRaises(SystemExit) as error:
+                    app.main(flags)
+                self.assertEqual(error.exception.code, 2)
+                self.assertIn('usage:', self.stderr.getvalue())
+                self.assertNotIn('Traceback (most recent call last):', self.stderr.getvalue())
+
     def test_quiet_keeps_connection_prompt_and_session_output(self):
         logger, logfile = app.setLogger(quiet=True)
 
@@ -97,6 +162,7 @@ class QuietTests(unittest.TestCase):
             app.main(['--quiet', '--help'])
         self.assertEqual(error.exception.code, 0)
         self.assertIn('--quiet', self.stdout.getvalue())
+        self.assertIn('--traceback', self.stdout.getvalue())
         self.assertEqual(self.stderr.getvalue(), '')
 
 
