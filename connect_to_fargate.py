@@ -365,8 +365,18 @@ def get_ecs_client():
   return session.client('ecs')
 
 
+class FargateArgumentParser(argparse.ArgumentParser):
+  def parse_args(self, args=None, namespace=None):
+    parsed = super().parse_args(args, namespace)
+    if parsed.container_selection_fallback is not None and parsed.container_selection != 'auto':
+      self.error('--container-selection-fallback は --container-selection auto と同時に指定してください')
+    if parsed.container_selection_fallback is None:
+      parsed.container_selection_fallback = 'error'
+    return parsed
+
+
 def build_parser():
-  parser = argparse.ArgumentParser(
+  parser = FargateArgumentParser(
     prog='connect_to_fargate.py',
     description='AWS SSO の状態を確認し、必要に応じてログインしてから Fargate に接続します。',
     epilog=(
@@ -387,7 +397,16 @@ def build_parser():
     '--task-selection', choices=['prompt', 'latest', 'oldest'], default='prompt',
     help='複数タスクの選択方法（既定: prompt）。1件の場合は常に自動選択',
   )
-  parser.add_argument('-t', '--container', help='コンテナ名')
+  container_group = parser.add_mutually_exclusive_group()
+  container_group.add_argument('-t', '--container', help='コンテナ名')
+  container_group.add_argument(
+    '--container-selection', choices=['prompt', 'auto'], default='prompt',
+    help='コンテナの選択方法（既定: prompt）。auto は app → web → scheduler → queue → email → webhook → worker → docs → queue-redis → api → nginx → seven-worker → queue-email の優先順',
+  )
+  parser.add_argument(
+    '--container-selection-fallback', choices=['error', 'prompt'],
+    help='優先候補が存在しない場合の動作（既定: error）。--container-selection auto の指定が必要',
+  )
   parser.add_argument('--cmd', default='/bin/bash', help='コンテナで実行するコマンド')
   parser.add_argument('-f', '--force', action='store_true', help='接続確認なしでログインを行う')
   parser.add_argument(
@@ -690,48 +709,52 @@ def setTask(logger, cluster_name, service_name, selection='prompt'):
   else :
     raise Exception('選択したタスクが稼働中ではありません。別タスクへの切り替えは行いません。')
 
+def get_container_candidates(cluster_name, task_name):
+  ecs = get_ecs_client()
+  response = ecs.describe_tasks(cluster=cluster_name, tasks=[task_name])
+  if response.get('failures'):
+    raise Exception('コンテナ情報の取得に失敗しました: {}'.format(response['failures']))
+  return list(dict.fromkeys(
+    container['name']
+    for task in response['tasks']
+    for container in task.get('containers', [])
+  ))
+
+
 # コンテナ名のチェック
 def checkContainer(cluster_name, task_name, container_name):
-  ecs = get_ecs_client()
-
-  task_detail_list = ecs.describe_tasks(
-    cluster = cluster_name,
-    tasks=[
-      task_name
-    ],
-  )
-  container_name_list = []
-  for task in task_detail_list['tasks']:
-    for container in task['overrides']['containerOverrides']:
-      container_name_list.append(container['name'])
-
-  if container_name in container_name_list:
-    return True
-  else :
-    return False
+  return container_name in get_container_candidates(cluster_name, task_name)
 
 # コンテナ名の設定
-def setContainer(logger, cluster_name, task_name):
-  ecs = get_ecs_client()
+def setContainer(logger, cluster_name, task_name, selection='prompt', fallback='error'):
+  container_list = get_container_candidates(cluster_name, task_name)
+  if not container_list:
+    raise Exception('指定したタスクにコンテナが存在しません。')
 
-  container_list = []
-  task_detail_list = ecs.describe_tasks(
-    cluster = cluster_name,
-    tasks=[
-      task_name
-    ],
-  )
-  for task in task_detail_list['tasks']:
-    for container in task['overrides']['containerOverrides']:
-      container_list.append(container['name'])
-
-  container_name = selected_answer(container_list, "接続先のコンテナ名を選択してください")
+  container_name = None
+  if selection == 'auto':
+    container_name = next((
+      name for name in (
+        'app', 'web', 'scheduler', 'queue', 'email', 'webhook', 'worker', 'docs', 'queue-redis',
+        'api', 'nginx', 'seven-worker', 'queue-email',
+      )
+      if name in container_list
+    ), None)
+    if container_name is None and fallback == 'error':
+      raise Exception(
+        '優先候補のコンテナ（app, web, scheduler, queue, email, webhook, worker, docs, queue-redis, '
+        'api, nginx, seven-worker, queue-email）が存在しません。'
+        '利用可能なコンテナ: {}。--container で指定するか、'
+        '--container-selection-fallback prompt を指定してください。'.format(', '.join(container_list))
+      )
+  if container_name is None:
+    container_name = selected_answer(container_list, "接続先のコンテナ名を選択してください")
 
   if checkContainer(cluster_name, task_name, container_name):
     logger.info('コンテナ名: {}\n'.format(container_name))
     return container_name
   else :
-    raise Exception('正しいコンテナ名を選択してください。')
+    raise Exception('選択したコンテナが存在しません。別コンテナ・別タスクへの切り替えは行いません。')
 
 # FARGATEへ接続
 def ecsExecute(logger, cluster_name, service_name, task_name, container_name, shell_cmd, logfile, force_connect):
@@ -833,7 +856,9 @@ def run_main_flow(args, logger, logfile):
     if checkCluster(cluster_name) and \
        checkService(cluster_name, service_name) and \
        checkTask(cluster_name, service_name, task_name):
-      container_name = setContainer(logger, cluster_name, task_name)
+      container_name = setContainer(
+        logger, cluster_name, task_name, args.container_selection, args.container_selection_fallback,
+      )
     else:
       raise Exception('正しいクラスター名またはサービス名またはタスク名を指定してください。')
 

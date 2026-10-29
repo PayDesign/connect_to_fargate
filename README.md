@@ -163,6 +163,10 @@ SSO セッションの有効期限は AWS CLI の SSO キャッシュ `expiresAt
 
 `-t, --container=コンテナ名`（指定ない場合は、対話型の選択画面に遷移）
 
+`--container-selection {prompt,auto}` コンテナの選択方法（既定値: `prompt`）。`--container` とは同時指定不可
+
+`--container-selection-fallback {error,prompt}` 自動選択の優先候補が存在しない場合の動作（既定値: `error`）。`--container-selection auto` 指定時のみ利用可能
+
 --cmd=コンテナで実行するコマンド（指定ない場合は、/bin/bash）
 
 `-f, --force` 接続確認なしでログインを行う
@@ -183,7 +187,9 @@ $ connect_to_fargate.py --help
 usage: connect_to_fargate.py [-h] [-p PROFILE] [-c CLUSTER] [-s SERVICE]
                              [--task TASK |
                              --task-selection {prompt,latest,oldest}]
-                             [-t CONTAINER] [--cmd CMD] [-f] [-q]
+                             [-t CONTAINER | --container-selection {prompt,auto}]
+                             [--container-selection-fallback {error,prompt}]
+                             [--cmd CMD] [-f] [-q]
                              [--force-login]
 ```
 
@@ -221,6 +227,36 @@ connect_to_fargate.py -p profile -c cluster -s service -t app \
 候補件数、選択ルール、選択したタスクID、起動日時を表示・ログ出力します（`--quiet` 指定時はファイルへの記録のみ）。選択後にタスクが停止した場合はエラーとし、別タスクへの自動切り替えは行いません。
 
 `-f` は接続確認だけを省略します。`--task-selection` はタスク選択にだけ適用されるため、クラスター・サービス・コンテナの未指定時は引き続き選択画面が表示されます。SSO の再ログインが必要な場合はブラウザでの認証も発生します。
+
+### コンテナの自動選択
+
+`--container-selection auto` を指定すると、選択済みタスク内のコンテナ名を完全一致で検索し、`app` → `web` → `scheduler` → `queue` → `email` → `webhook` → `worker` → `docs` → `queue-redis` → `api` → `nginx` → `seven-worker` → `queue-email` の優先順で最初に存在するコンテナを選びます。`App` や `my-app` は `app` と一致しません。
+
+`--task` を指定した場合は、そのタスク内だけを検索します。タスク未指定時は既存のタスク選択ルールで対象を決めてから検索します。スタンドアロンタスクでも同じ動作です。
+
+| 指定 | 動作 |
+| --- | --- |
+| `--container-selection` 省略、または `prompt` | コンテナ一覧から対話選択（候補が1件でも表示） |
+| `auto` で優先候補あり | 優先順で自動選択 |
+| `auto` で優先候補なし、フォールバック省略または `error` | 利用可能なコンテナ名をエラーに表示して終了 |
+| `auto` で優先候補なし、フォールバックが `prompt` | 同じタスク内のコンテナ一覧から対話選択 |
+| コンテナが0件 | フォールバックの指定にかかわらずエラーで終了 |
+
+`--container` と `--container-selection` は同時指定できません。`--container-selection-fallback` は、`error` を明示する場合も `--container-selection auto` の指定が必要です。選択後にコンテナが存在しなくなった場合はエラーとし、別コンテナや別タスクへ自動で切り替えません。
+
+```bash
+# 指定タスク内でコンテナを自動選択。優先候補がなければエラー
+connect_to_fargate.py -p profile -c cluster -s service --task TASK_ID \
+  --container-selection auto
+
+# 優先候補がなければコンテナ一覧から対話選択
+connect_to_fargate.py -p profile -c cluster -s service --task TASK_ID \
+  --container-selection auto --container-selection-fallback prompt
+
+# タスクとコンテナを自動選択して、接続確認を省略
+connect_to_fargate.py -p profile -c cluster -s service \
+  --task-selection latest --container-selection auto -f
+```
 
 ### 通常メッセージの抑制
 
